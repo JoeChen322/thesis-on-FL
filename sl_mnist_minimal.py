@@ -1,7 +1,65 @@
+import argparse
+import random
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from torch.utils.data import DataLoader, Subset
+from torchvision import datasets, transforms
+
+
+SEED = 1234
+BATCH_SIZE = 64
+LR_CLIENT = 0.01
+LR_SERVER = 0.01
+
+
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
+# -----------------------------
+# Dataset split
+# -----------------------------
+def split_dataset_iid(dataset, num_clients):
+    indices = np.random.permutation(len(dataset))
+    return np.array_split(indices, num_clients)
+
+
+def load_data(num_clients):
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,))
+    ])
+
+    train_dataset = datasets.MNIST(
+        root="./data",
+        train=True,
+        download=True,
+        transform=transform,
+    )
+    test_dataset = datasets.MNIST(
+        root="./data",
+        train=False,
+        download=True,
+        transform=transform,
+    )
+
+    client_indices = split_dataset_iid(train_dataset, num_clients)
+    client_loaders = []
+    client_sizes = []
+
+    for indices in client_indices:
+        subset = Subset(train_dataset, indices)
+        client_loaders.append(DataLoader(subset, batch_size=BATCH_SIZE, shuffle=True))
+        client_sizes.append(len(subset))
+
+    test_loader = DataLoader(test_dataset, batch_size=256, shuffle=False)
+    return client_loaders, client_sizes, test_loader
 
 
 # -----------------------------
@@ -19,7 +77,7 @@ class ClientNet(nn.Module):
 
 
 # -----------------------------
-# Server-side model
+# Main server-side model
 # -----------------------------
 class ServerNet(nn.Module):
     def __init__(self):
@@ -30,66 +88,156 @@ class ServerNet(nn.Module):
         return self.fc2(smashed_data)
 
 
-client_model = ClientNet()
-server_model = ServerNet()
+def train_one_client(
+    client_model,
+    server_model,
+    trainloader,
+    client_optimizer,
+    server_optimizer,
+    criterion,
+    device,
+):
+    client_model.train()
+    server_model.train()
 
-client_optimizer = optim.SGD(client_model.parameters(), lr=0.01)
-server_optimizer = optim.SGD(server_model.parameters(), lr=0.01)
+    total_loss = 0.0
+    correct = 0
+    total = 0
 
-criterion = nn.CrossEntropyLoss()
-num_rounds = 10
+    for x, y in trainloader:
+        x, y = x.to(device), y.to(device)
+
+        client_optimizer.zero_grad()
+        server_optimizer.zero_grad()
+
+        # Client forward: the client keeps raw data and its model locally.
+        smashed_data = client_model(x)
+
+        # Simulate sending smashed data from this client to the main server.
+        smashed_data_for_server = smashed_data.detach().requires_grad_()
+
+        # Main server forward/backward on the shared server-side model.
+        output = server_model(smashed_data_for_server)
+        loss = criterion(output, y)
+        loss.backward()
+        server_optimizer.step()
+
+        # Simulate sending gradient back from main server to this client.
+        grad_from_server = smashed_data_for_server.grad.detach()
+        smashed_data.backward(grad_from_server)
+        client_optimizer.step()
+
+        total_loss += loss.item() * y.size(0)
+        pred = output.argmax(dim=1)
+        correct += (pred == y).sum().item()
+        total += y.size(0)
+
+    return total_loss / total, correct / total
 
 
-# -----------------------------
-# Fake one batch of MNIST-like data
-# -----------------------------
-x = torch.randn(32, 1, 28, 28)
-y = torch.randint(0, 10, (32,))
+def evaluate_client(client_model, server_model, testloader, criterion, device):
+    client_model.eval()
+    server_model.eval()
+
+    total_loss = 0.0
+    correct = 0
+    total = 0
+
+    with torch.no_grad():
+        for x, y in testloader:
+            x, y = x.to(device), y.to(device)
+            smashed_data = client_model(x)
+            output = server_model(smashed_data)
+            loss = criterion(output, y)
+
+            total_loss += loss.item() * y.size(0)
+            pred = output.argmax(dim=1)
+            correct += (pred == y).sum().item()
+            total += y.size(0)
+
+    return total_loss / total, correct / total
 
 
-for round_idx in range(1, num_rounds + 1):
-    # -----------------------------
-    # Split Learning forward
-    # -----------------------------
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--num-clients", type=int, default=3)
+    parser.add_argument("--num-rounds", type=int, default=10)
+    parser.add_argument("--local-epochs", type=int, default=1)
+    return parser.parse_args()
 
-    # 1. Client forward
-    smashed_data = client_model(x)
 
-    # In real SL, this tensor is sent from client to server.
-    # Here we detach it to simulate transmission.
-    smashed_data_for_server = smashed_data.detach().requires_grad_()
+def main():
+    args = parse_args()
+    if args.num_clients < 1:
+        raise ValueError("--num-clients must be at least 1")
 
-    # 2. Server forward
-    output = server_model(smashed_data_for_server)
-    loss = criterion(output, y)
+    set_seed(SEED)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # -----------------------------
-    # Split Learning backward
-    # -----------------------------
+    client_loaders, client_sizes, test_loader = load_data(args.num_clients)
 
-    server_optimizer.zero_grad()
-    client_optimizer.zero_grad()
+    client_models = [ClientNet().to(device) for _ in range(args.num_clients)]
+    client_optimizers = [
+        optim.SGD(client_model.parameters(), lr=LR_CLIENT)
+        for client_model in client_models
+    ]
 
-    # 3. Server backward
-    loss.backward()
+    main_server_model = ServerNet().to(device)
+    server_optimizer = optim.SGD(main_server_model.parameters(), lr=LR_SERVER)
+    criterion = nn.CrossEntropyLoss()
 
-    # 4. Server updates server-side model
-    server_optimizer.step()
+    print(f"Device: {device}")
+    print(f"Number of clients: {args.num_clients}")
+    print(f"Client data sizes: {client_sizes}")
+    print("Start multi-client Split Learning training")
 
-    # 5. Server sends gradient of smashed_data back to client
-    grad_from_server = smashed_data_for_server.grad
+    for round_idx in range(1, args.num_rounds + 1):
+        print(f"\n========== Round {round_idx} ==========")
+        round_losses = []
+        round_accs = []
 
-    # 6. Client backward using received gradient
-    smashed_data.backward(grad_from_server)
+        for client_id in range(args.num_clients):
+            for _ in range(args.local_epochs):
+                train_loss, train_acc = train_one_client(
+                    client_model=client_models[client_id],
+                    server_model=main_server_model,
+                    trainloader=client_loaders[client_id],
+                    client_optimizer=client_optimizers[client_id],
+                    server_optimizer=server_optimizer,
+                    criterion=criterion,
+                    device=device,
+                )
 
-    # 7. Client updates client-side model
-    client_optimizer.step()
+            round_losses.append(train_loss)
+            round_accs.append(train_acc)
+            print(
+                f"Client {client_id} -> main server: "
+                f"train loss = {train_loss:.4f}, "
+                f"train acc = {train_acc * 100:.2f}%"
+            )
 
-    pred = output.argmax(dim=1)
-    accuracy = (pred == y).float().mean().item()
+        eval_losses = []
+        eval_accs = []
+        for client_id, client_model in enumerate(client_models):
+            test_loss, test_acc = evaluate_client(
+                client_model,
+                main_server_model,
+                test_loader,
+                criterion,
+                device,
+            )
+            eval_losses.append(test_loss)
+            eval_accs.append(test_acc)
 
-    print(
-        f"round {round_idx:02d}/{num_rounds} "
-        f"loss: {loss.item():.4f} "
-        f"accuracy: {accuracy:.4f}"
-    )
+        print("--------------------------------")
+        print(f"Round {round_idx} summary:")
+        print(f"Average train loss: {np.mean(round_losses):.4f}")
+        print(f"Average train acc:  {np.mean(round_accs) * 100:.2f}%")
+        print(f"Average test loss:  {np.mean(eval_losses):.4f}")
+        print(f"Average test acc:   {np.mean(eval_accs) * 100:.2f}%")
+
+    print("\nTraining finished.")
+
+
+if __name__ == "__main__":
+    main()
