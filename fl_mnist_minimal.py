@@ -195,6 +195,20 @@ def weighted_average(metrics):
     return {"accuracy": sum(accuracies) / sum(examples)}
 
 
+def aggregate_parameters(results):
+    total_examples = sum(num_examples for _, num_examples in results)
+    aggregated = []
+
+    for param_values in zip(*(parameters for parameters, _ in results)):
+        weighted_param = sum(
+            param * num_examples / total_examples
+            for param, (_, num_examples) in zip(param_values, results)
+        )
+        aggregated.append(weighted_param)
+
+    return aggregated
+
+
 # -----------------------------
 # Start Flower server/client
 # -----------------------------
@@ -224,21 +238,50 @@ def start_client(client_id, num_clients, server_address):
 
 
 def start_simulation(num_clients, num_rounds):
-    strategy = fl.server.strategy.FedAvg(
-        fraction_fit=1.0,
-        fraction_evaluate=1.0,
-        min_fit_clients=num_clients,
-        min_evaluate_clients=num_clients,
-        min_available_clients=num_clients,
-        evaluate_metrics_aggregation_fn=weighted_average,
-    )
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    global_model = Net().to(device)
+    global_parameters = get_parameters(global_model)
 
-    fl.simulation.start_simulation(
-        client_fn=lambda cid: client_fn(cid, num_clients),
-        num_clients=num_clients,
-        config=fl.server.ServerConfig(num_rounds=num_rounds),
-        strategy=strategy,
-    )
+    print(f"Device: {device}")
+    print(f"Number of clients: {num_clients}")
+    print("Start local FL simulation")
+
+    for round_idx in range(1, num_rounds + 1):
+        print(f"\n========== Round {round_idx} ==========")
+
+        fit_results = []
+        eval_results = []
+
+        for client_id in range(num_clients):
+            client = FlowerClient(client_id, num_clients, device)
+            parameters, num_examples, _ = client.fit(global_parameters, {})
+            fit_results.append((parameters, num_examples))
+
+            loss, test_examples, metrics = client.evaluate(parameters, {})
+            eval_results.append((test_examples, {"loss": loss, **metrics}))
+
+            print(
+                f"Client {client_id}: "
+                f"test loss = {loss:.4f}, "
+                f"test acc = {metrics['accuracy'] * 100:.2f}%"
+            )
+
+        global_parameters = aggregate_parameters(fit_results)
+        avg_loss = sum(num_examples * m["loss"] for num_examples, m in eval_results)
+        avg_loss /= sum(num_examples for num_examples, _ in eval_results)
+        avg_accuracy = weighted_average(
+            [
+                (num_examples, {"accuracy": metrics["accuracy"]})
+                for num_examples, metrics in eval_results
+            ]
+        )["accuracy"]
+
+        print("--------------------------------")
+        print(f"Round {round_idx} summary:")
+        print(f"Average test loss: {avg_loss:.4f}")
+        print(f"Average test acc:  {avg_accuracy * 100:.2f}%")
+
+    print("\nTraining finished.")
 
 
 def parse_args():
