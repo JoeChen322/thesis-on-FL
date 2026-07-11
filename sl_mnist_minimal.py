@@ -1,5 +1,6 @@
 import argparse
 import random
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -158,11 +159,53 @@ def evaluate_client(client_model, server_model, testloader, criterion, device):
     return total_loss / total, correct / total
 
 
+def load_checkpoint(checkpoint_path, client_models, server_model, device):
+    if not checkpoint_path:
+        return
+
+    path = Path(checkpoint_path)
+    if not path.exists():
+        return
+
+    checkpoint = torch.load(path, map_location=device)
+    client_states = checkpoint["client_models"]
+    if len(client_states) != len(client_models):
+        raise ValueError(
+            f"Checkpoint has {len(client_states)} clients, "
+            f"but current run has {len(client_models)} clients"
+        )
+
+    for client_model, state_dict in zip(client_models, client_states):
+        client_model.load_state_dict(state_dict)
+    server_model.load_state_dict(checkpoint["server_model"])
+    print(f"Loaded checkpoint: {path}")
+
+
+def save_checkpoint(checkpoint_path, client_models, server_model):
+    if not checkpoint_path:
+        return
+
+    path = Path(checkpoint_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "client_models": [
+                client_model.state_dict()
+                for client_model in client_models
+            ],
+            "server_model": server_model.state_dict(),
+        },
+        path,
+    )
+    print(f"Saved checkpoint: {path}")
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--num-clients", type=int, default=3)
     parser.add_argument("--num-rounds", type=int, default=10)
     parser.add_argument("--local-epochs", type=int, default=1)
+    parser.add_argument("--checkpoint-path", default="")
     return parser.parse_args()
 
 
@@ -185,6 +228,7 @@ def main():
     main_server_model = ServerNet().to(device)
     server_optimizer = optim.SGD(main_server_model.parameters(), lr=LR_SERVER)
     criterion = nn.CrossEntropyLoss()
+    load_checkpoint(args.checkpoint_path, client_models, main_server_model, device)
 
     print(f"Device: {device}")
     print(f"Number of clients: {args.num_clients}")
@@ -237,6 +281,7 @@ def main():
         print(f"Average test acc:   {np.mean(eval_accs) * 100:.2f}%")
 
     print("\nTraining finished.")
+    save_checkpoint(args.checkpoint_path, client_models, main_server_model)
 
 
 if __name__ == "__main__":

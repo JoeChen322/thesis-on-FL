@@ -5,6 +5,7 @@ AND the accurancy for each clients improved"""
 import os
 import argparse
 from collections import OrderedDict
+from pathlib import Path
 
 import flwr as fl
 import numpy as np
@@ -209,6 +210,29 @@ def aggregate_parameters(results):
     return aggregated
 
 
+def load_checkpoint(checkpoint_path, model, device):
+    if not checkpoint_path:
+        return
+
+    path = Path(checkpoint_path)
+    if not path.exists():
+        return
+
+    checkpoint = torch.load(path, map_location=device)
+    model.load_state_dict(checkpoint["model"])
+    print(f"Loaded checkpoint: {path}")
+
+
+def save_checkpoint(checkpoint_path, model):
+    if not checkpoint_path:
+        return
+
+    path = Path(checkpoint_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"model": model.state_dict()}, path)
+    print(f"Saved checkpoint: {path}")
+
+
 # -----------------------------
 # Start Flower server/client
 # -----------------------------
@@ -237,9 +261,10 @@ def start_client(client_id, num_clients, server_address):
     )
 
 
-def start_simulation(num_clients, num_rounds):
+def start_simulation(num_clients, num_rounds, checkpoint_path=""):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     global_model = Net().to(device)
+    load_checkpoint(checkpoint_path, global_model, device)
     global_parameters = get_parameters(global_model)
 
     print(f"Device: {device}")
@@ -267,6 +292,7 @@ def start_simulation(num_clients, num_rounds):
             )
 
         global_parameters = aggregate_parameters(fit_results)
+        set_parameters(global_model, global_parameters)
         avg_loss = sum(num_examples * m["loss"] for num_examples, m in eval_results)
         avg_loss /= sum(num_examples for num_examples, _ in eval_results)
         avg_accuracy = weighted_average(
@@ -282,6 +308,7 @@ def start_simulation(num_clients, num_rounds):
         print(f"Average test acc:  {avg_accuracy * 100:.2f}%")
 
     print("\nTraining finished.")
+    save_checkpoint(checkpoint_path, global_model)
 
 
 def parse_args():
@@ -296,6 +323,7 @@ def parse_args():
     parser.add_argument("--num-clients", type=int, default=2)
     parser.add_argument("--num-rounds", type=int, default=3)
     parser.add_argument("--server-address", default="127.0.0.1:8080")
+    parser.add_argument("--checkpoint-path", default="")
     return parser.parse_args()
 
 
@@ -307,4 +335,4 @@ if __name__ == "__main__":
     elif args.mode == "client":
         start_client(args.client_id, args.num_clients, args.server_address)
     else:
-        start_simulation(args.num_clients, args.num_rounds)
+        start_simulation(args.num_clients, args.num_rounds, args.checkpoint_path)
