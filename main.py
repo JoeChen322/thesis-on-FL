@@ -10,26 +10,26 @@ def choose_method(args):
     if args.method != "auto":
         return args.method, f"manual override: --method {args.method}"
 
-    if args.networking_environment in ("unstable", "limited"):
-        return "fl", f"{args.networking_environment} network favors fewer communication rounds"
+    client_cpus = parse_client_cpus(args.client_cpus, args.num_clients)
+    if args.num_clients > 5 and all(cpu_count >= 2 for cpu_count in client_cpus):
+        return "fl", "more than 5 clients and every client has at least 2 CPUs"
 
-    if args.accuracy_priority == "high":
-        return "fl", "high accuracy priority favors the FL CNN model"
+    if args.num_clients < 5:
+        return "sl", "fewer than 5 clients"
 
-    if args.performance_priority == "high" and args.num_clients <= 3:
-        return "sl", "high performance priority with few clients favors SL"
-
-    if args.num_clients > 3:
-        return "fl", "more than 3 clients favors FL"
-
-    return "sl", "stable network with few clients favors SL"
+    return "sfl", "middle case uses SFL"
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--num-clients", type=int, required=True)
     parser.add_argument("--num-rounds", type=int, default=3)
-    parser.add_argument("--method", choices=("auto", "fl", "sl"), default="auto")
+    parser.add_argument("--method", choices=("auto", "fl", "sl", "sfl"), default="auto")
+    parser.add_argument(
+        "--client-cpus",
+        default="1",
+        help="Client CPU counts. Use one integer for all clients or comma-separated values.",
+    )
     parser.add_argument(
         "--accuracy-priority",
         choices=("low", "normal", "high"),
@@ -93,6 +93,20 @@ def checkpoint_path_for_method(project_root, checkpoint_dir, method):
     return project_root / checkpoint_dir / f"{method}_checkpoint.pt"
 
 
+def parse_client_cpus(value, num_clients):
+    cpu_counts = [int(item.strip()) for item in value.split(",") if item.strip()]
+    if not cpu_counts:
+        raise ValueError("--client-cpus must contain at least one positive integer")
+    if any(cpu_count < 1 for cpu_count in cpu_counts):
+        raise ValueError("--client-cpus values must be positive integers")
+
+    if len(cpu_counts) == 1:
+        return cpu_counts * num_clients
+    if len(cpu_counts) != num_clients:
+        raise ValueError("--client-cpus list length must equal --num-clients")
+    return cpu_counts
+
+
 def build_command(args, project_root, python_executable, method, num_rounds, checkpoint_path=None):
     if method == "fl":
         command = [
@@ -113,6 +127,19 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
             command.extend(["--checkpoint-path", str(checkpoint_path)])
         return command
 
+    if method == "sfl":
+        command = [
+            python_executable,
+            str(project_root / "fsl_mnist_minimal.py"),
+            "--num-clients",
+            str(args.num_clients),
+            "--num-rounds",
+            str(num_rounds),
+        ]
+        if checkpoint_path is not None:
+            command.extend(["--checkpoint-path", str(checkpoint_path)])
+        return command
+
     command = [
         python_executable,
         str(project_root / "sl_mnist_minimal.py"),
@@ -127,9 +154,9 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
 
 
 def switch_method(method):
-    if method == "fl":
-        return "sl"
-    return "fl"
+    if method == "sl":
+        return "sfl"
+    return method
 
 
 def parse_communication_delay(value):
@@ -240,13 +267,22 @@ def run_with_adaptive_switch(args, project_root, python_executable, method, sele
             if communication_time > switch_limit:
                 old_method = method
                 method = switch_method(method)
-                print(
-                    f"Round {round_number}: {communication_time:.4f}s > "
-                    f"{previous_communication_time:.4f}s + "
-                    f"{args.switch_threshold * 100:.1f}%, next round switches "
-                    f"{old_method.upper()} -> {method.upper()}",
-                    flush=True,
-                )
+                if method != old_method:
+                    print(
+                        f"Round {round_number}: {communication_time:.4f}s > "
+                        f"{previous_communication_time:.4f}s + "
+                        f"{args.switch_threshold * 100:.1f}%, next round switches "
+                        f"{old_method.upper()} -> {method.upper()}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"Round {round_number}: {communication_time:.4f}s > "
+                        f"{previous_communication_time:.4f}s + "
+                        f"{args.switch_threshold * 100:.1f}%, "
+                        f"but {method.upper()} delay switching is disabled",
+                        flush=True,
+                    )
             else:
                 print(
                     f"Round {round_number}: {communication_time:.4f}s within threshold, "

@@ -1,9 +1,11 @@
+import argparse
 import copy
+from pathlib import Path
 import random
 import numpy as np
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 
 
@@ -18,9 +20,6 @@ torch.manual_seed(SEED)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-NUM_CLIENTS = 3
-ROUNDS = 5
-LOCAL_EPOCHS = 1
 BATCH_SIZE = 64
 LR_CLIENT = 0.01
 LR_SERVER = 0.01
@@ -225,11 +224,54 @@ def evaluate(client_model, server_model, dataloader, criterion):
     return avg_loss, accuracy
 
 
+def load_checkpoint(checkpoint_path, client_model, server_model):
+    if not checkpoint_path:
+        return
+
+    path = Path(checkpoint_path)
+    if not path.exists():
+        return
+
+    checkpoint = torch.load(path, map_location=device)
+    client_model.load_state_dict(checkpoint["global_client_model"])
+    server_model.load_state_dict(checkpoint["server_model"])
+    print(f"Loaded checkpoint: {path}")
+
+
+def save_checkpoint(checkpoint_path, client_model, server_model):
+    if not checkpoint_path:
+        return
+
+    path = Path(checkpoint_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "global_client_model": client_model.state_dict(),
+            "server_model": server_model.state_dict(),
+        },
+        path,
+    )
+    print(f"Saved checkpoint: {path}")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--num-clients", type=int, default=3)
+    parser.add_argument("--num-rounds", type=int, default=5)
+    parser.add_argument("--local-epochs", type=int, default=1)
+    parser.add_argument("--checkpoint-path", default="")
+    return parser.parse_args()
+
+
 # ============================================================
 # Main training process
 # ============================================================
 
 def main():
+    args = parse_args()
+    if args.num_clients < 1:
+        raise ValueError("--num-clients must be at least 1")
+
     transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.1307,), (0.3081,))
@@ -249,12 +291,12 @@ def main():
         transform=transform
     )
 
-    client_indices = split_dataset_iid(train_dataset, NUM_CLIENTS)
+    client_indices = split_dataset_iid(train_dataset, args.num_clients)
 
     client_loaders = []
     client_sizes = []
 
-    for i in range(NUM_CLIENTS):
+    for i in range(args.num_clients):
         subset = Subset(train_dataset, client_indices[i])
         loader = DataLoader(subset, batch_size=BATCH_SIZE, shuffle=True)
         client_loaders.append(loader)
@@ -269,13 +311,14 @@ def main():
     server_model = ServerNet().to(device)
 
     criterion = nn.CrossEntropyLoss()
+    load_checkpoint(args.checkpoint_path, global_client_model, server_model)
 
     print(f"Device: {device}")
-    print(f"Number of clients: {NUM_CLIENTS}")
+    print(f"Number of clients: {args.num_clients}")
     print(f"Client data sizes: {client_sizes}")
     print("Start Federated Split Learning training")
 
-    for round_id in range(ROUNDS):
+    for round_id in range(args.num_rounds):
         print(f"\n========== Round {round_id + 1} ==========")
 
         local_client_states = []
@@ -286,7 +329,7 @@ def main():
         # In SFLV2, server-side model is shared and continuously updated.
         optimizer_server = torch.optim.SGD(server_model.parameters(), lr=LR_SERVER)
 
-        for client_id in range(NUM_CLIENTS):
+        for client_id in range(args.num_clients):
             # Each client starts from the current global client-side model
             local_client_model = copy.deepcopy(global_client_model).to(device)
 
@@ -295,7 +338,7 @@ def main():
                 lr=LR_CLIENT
             )
 
-            for _ in range(LOCAL_EPOCHS):
+            for _ in range(args.local_epochs):
                 train_loss, train_acc = train_one_client(
                     client_model=local_client_model,
                     server_model=server_model,
@@ -335,6 +378,7 @@ def main():
         print(f"Test acc:           {test_acc * 100:.2f}%")
 
     print("\nTraining finished.")
+    save_checkpoint(args.checkpoint_path, global_client_model, server_model)
 
 
 if __name__ == "__main__":
