@@ -37,18 +37,6 @@ def parse_args():
         help="How strongly to prefer the method with better observed accuracy.",
     )
     parser.add_argument(
-        "--performance-priority",
-        choices=("low", "normal", "high"),
-        default="normal",
-        help="How strongly to prefer faster local runtime.",
-    )
-    parser.add_argument(
-        "--networking-environment",
-        choices=("local", "stable", "unstable", "limited"),
-        default="stable",
-        help="Network condition used by --method auto.",
-    )
-    parser.add_argument(
         "--adaptive-communication-switch",
         action="store_true",
         help="Measure communication time each round and switch method if it grows too much.",
@@ -63,11 +51,6 @@ def parse_args():
         type=float,
         default=0.2,
         help="Switch method when communication time is higher than the previous round by this ratio.",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Print selected commands without running training.",
     )
     parser.add_argument(
         "--checkpoint-dir",
@@ -140,22 +123,27 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
             command.extend(["--checkpoint-path", str(checkpoint_path)])
         return command
 
-    command = [
-        python_executable,
-        str(project_root / "sl_mnist_minimal.py"),
-        "--num-clients",
-        str(args.num_clients),
-        "--num-rounds",
-        str(num_rounds),
-    ]
-    if checkpoint_path is not None:
-        command.extend(["--checkpoint-path", str(checkpoint_path)])
-    return command
+    if method == "sl":
+        command = [
+            python_executable,
+            str(project_root / "sl_mnist_minimal.py"),
+            "--num-clients",
+            str(args.num_clients),
+            "--num-rounds",
+            str(num_rounds),
+        ]
+        if checkpoint_path is not None:
+            command.extend(["--checkpoint-path", str(checkpoint_path)])
+        return command
+
+    raise ValueError(f"Unknown method: {method}")
 
 
 def switch_method(method):
     if method == "sl":
         return "sfl"
+    if method == "sfl":
+        return "fl"
     return method
 
 
@@ -178,16 +166,13 @@ def timestamp():
     return datetime.now().isoformat(timespec="milliseconds")
 
 
-def run_command(command, project_root, dry_run, simulated_delay=0.0):
+def run_command(command, project_root, simulated_delay=0.0):
     start_timestamp = timestamp()
     start_time = time.perf_counter()
 
     print(f"Communication start timestamp: {start_timestamp}", flush=True)
 
-    if dry_run:
-        print(f"Dry run command: {' '.join(command)}", flush=True)
-    else:
-        subprocess.run(command, check=True, cwd=project_root)
+    subprocess.run(command, check=True, cwd=project_root)
 
     end_timestamp = timestamp()
     real_elapsed_time = time.perf_counter() - start_time
@@ -220,7 +205,6 @@ def run_once(args, project_root, python_executable, method, selection_reason):
     run_command(
         command,
         project_root,
-        args.dry_run,
         simulated_delay=total_simulated_delay,
     )
 
@@ -258,7 +242,6 @@ def run_with_adaptive_switch(args, project_root, python_executable, method, sele
         communication_time = run_command(
             command,
             project_root,
-            args.dry_run,
             simulated_delay=communication_delay_for_round(communication_delays, round_index),
         )
 

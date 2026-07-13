@@ -1,6 +1,6 @@
 """Test for FL by using library PyTorch-flower
 the result is the loss getting decrease after several epochs
-AND the accurancy for each clients improved"""
+AND the accurancy for each client improved"""
 
 import os
 import argparse

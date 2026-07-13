@@ -21,6 +21,7 @@ torch.manual_seed(SEED)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 BATCH_SIZE = 64
+#learning rate
 LR_CLIENT = 0.01
 LR_SERVER = 0.01
 
@@ -53,7 +54,7 @@ def split_dataset_iid(dataset, num_clients):
 class ClientNet(nn.Module):
     """
     The first part of the model.
-    It stays on the client side.
+    It sets on the client side.
     Input: MNIST image [1, 28, 28]
     Output: feature tensor
     """
@@ -169,7 +170,6 @@ def train_one_client(
         # Gradient w.r.t. activation.
         # In real FSL, this gradient is sent back to client.
         grad_to_client = smashed_data.grad.detach()
-
         optimizer_server.step()
 
         # -------------------------------
@@ -188,7 +188,6 @@ def train_one_client(
 
     avg_loss = total_loss / total
     accuracy = correct / total
-
     return avg_loss, accuracy
 
 
