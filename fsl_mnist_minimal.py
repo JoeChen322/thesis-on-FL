@@ -8,6 +8,8 @@ from torch import nn
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 
+from flower_split_message import run_message_local, run_message_simulation
+
 
 # ============================================================
 # Basic settings
@@ -255,10 +257,19 @@ def save_checkpoint(checkpoint_path, client_model, server_model):
 
 def parse_args():
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--mode",
+        choices=("local", "message-local", "message-simulation"),
+        default="local",
+        help="Run the original loop, local Flower Message API, or Ray simulation.",
+    )
     parser.add_argument("--num-clients", type=int, default=3)
     parser.add_argument("--num-rounds", type=int, default=5)
     parser.add_argument("--local-epochs", type=int, default=1)
     parser.add_argument("--checkpoint-path", default="")
+    parser.add_argument("--client-num-cpus", type=float, default=1.0)
+    parser.add_argument("--client-num-gpus", type=float, default=0.0)
+    parser.add_argument("--max-batches", type=int, default=0)
     return parser.parse_args()
 
 
@@ -270,6 +281,28 @@ def main():
     args = parse_args()
     if args.num_clients < 1:
         raise ValueError("--num-clients must be at least 1")
+
+    if args.mode in ("message-local", "message-simulation"):
+        runner = (
+            run_message_local
+            if args.mode == "message-local"
+            else run_message_simulation
+        )
+        runner(
+            client_model_cls=ClientNet,
+            server_model_cls=ServerNet,
+            num_clients=args.num_clients,
+            num_rounds=args.num_rounds,
+            local_epochs=args.local_epochs,
+            batch_size=BATCH_SIZE,
+            lr_client=LR_CLIENT,
+            lr_server=LR_SERVER,
+            use_client_fedavg=True,
+            num_cpus=args.client_num_cpus,
+            num_gpus=args.client_num_gpus,
+            max_batches=args.max_batches or None,
+        )
+        return
 
     transform = transforms.Compose([
         transforms.ToTensor(),

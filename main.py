@@ -58,17 +58,24 @@ def parse_args():
         help="Directory used to save per-method checkpoints in adaptive mode.",
     )
     parser.add_argument("--fl-mode", choices=("simulation", "server", "client"), default="simulation")
+    parser.add_argument(
+        "--split-mode",
+        choices=("local", "message-local", "message-simulation"),
+        default="local",
+        help="Execution mode for SL/SFL scripts.",
+    )
+    parser.add_argument(
+        "--max-batches",
+        type=int,
+        default=0,
+        help="Debug limit for SL/SFL batches per client. 0 means no limit.",
+    )
     parser.add_argument("--client-id", type=int, default=0)
     parser.add_argument("--server-address", default="127.0.0.1:8080")
     return parser.parse_args()
 
 
 def resolve_python_executable():
-    project_root = Path(__file__).resolve().parent
-    venv_python = project_root / ".venv" / "Scripts" / "python.exe"
-
-    if venv_python.exists():
-        return str(venv_python)
     return sys.executable
 
 
@@ -114,6 +121,8 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
         command = [
             python_executable,
             str(project_root / "fsl_mnist_minimal.py"),
+            "--mode",
+            args.split_mode,
             "--num-clients",
             str(args.num_clients),
             "--num-rounds",
@@ -121,12 +130,16 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
         ]
         if checkpoint_path is not None:
             command.extend(["--checkpoint-path", str(checkpoint_path)])
+        if args.max_batches:
+            command.extend(["--max-batches", str(args.max_batches)])
         return command
 
     if method == "sl":
         command = [
             python_executable,
             str(project_root / "sl_mnist_minimal.py"),
+            "--mode",
+            args.split_mode,
             "--num-clients",
             str(args.num_clients),
             "--num-rounds",
@@ -134,6 +147,8 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
         ]
         if checkpoint_path is not None:
             command.extend(["--checkpoint-path", str(checkpoint_path)])
+        if args.max_batches:
+            command.extend(["--max-batches", str(args.max_batches)])
         return command
 
     raise ValueError(f"Unknown method: {method}")
