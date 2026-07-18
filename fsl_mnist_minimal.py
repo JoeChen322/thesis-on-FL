@@ -11,10 +11,7 @@ from torchvision import datasets, transforms
 from flower_split_message import run_message_simulation
 
 
-# ============================================================
-# Basic settings
-# ============================================================
-
+# -------------Basic settings---------------------
 SEED = 1234
 random.seed(SEED)
 np.random.seed(SEED)
@@ -28,14 +25,13 @@ LR_CLIENT = 0.01
 LR_SERVER = 0.01
 
 
-# ============================================================
-# Dataset split
-# ============================================================
+
+#------------ Dataset split-------------
 
 def split_dataset_iid(dataset, num_clients):
     """
     Split dataset indices equally and randomly among clients.
-    This is IID splitting.
+    IID splitting.
     """
     indices = np.random.permutation(len(dataset))
     split_size = len(dataset) // num_clients
@@ -49,9 +45,8 @@ def split_dataset_iid(dataset, num_clients):
     return client_indices
 
 
-# ============================================================
-# Client-side model
-# ============================================================
+
+# --------------Client-side model--------------
 
 class ClientNet(nn.Module):
     """
