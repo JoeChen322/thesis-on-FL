@@ -55,7 +55,12 @@ def parse_args():
     parser.add_argument(
         "--checkpoint-dir",
         default=".checkpoints",
-        help="Directory used to save per-method checkpoints in adaptive mode.",
+        help="Directory used to save the shared checkpoint.",
+    )
+    parser.add_argument(
+        "--checkpoint-path",
+        default="",
+        help="Shared checkpoint path used by FL/SL/SFL. Defaults to checkpoint-dir/shared_<num-clients>clients_checkpoint.pt.",
     )
     parser.add_argument(
         "--max-batches",
@@ -70,8 +75,13 @@ def resolve_python_executable():
     return sys.executable
 
 
-def checkpoint_path_for_method(project_root, checkpoint_dir, method):
-    return project_root / checkpoint_dir / f"{method}_checkpoint.pt"
+def shared_checkpoint_path(project_root, args):
+    if args.checkpoint_path:
+        checkpoint_path = Path(args.checkpoint_path)
+        if checkpoint_path.is_absolute():
+            return checkpoint_path
+        return project_root / checkpoint_path
+    return project_root / args.checkpoint_dir / f"shared_{args.num_clients}clients_checkpoint.pt"
 
 
 def parse_client_cpus(value, num_clients):
@@ -193,6 +203,7 @@ def run_once(args, project_root, python_executable, method, selection_reason):
         python_executable=python_executable,
         method=method,
         num_rounds=args.num_rounds,
+        checkpoint_path=shared_checkpoint_path(project_root, args),
     )
 
     print(f"Selected method: {method.upper()} for {args.num_clients} clients", flush=True)
@@ -233,7 +244,7 @@ def run_with_adaptive_switch(args, project_root, python_executable, method, sele
             python_executable=python_executable,
             method=method,
             num_rounds=1,
-            checkpoint_path=checkpoint_path_for_method(project_root, args.checkpoint_dir, method),
+            checkpoint_path=shared_checkpoint_path(project_root, args),
         )
         communication_time = run_command(
             command,

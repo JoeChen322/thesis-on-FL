@@ -4,36 +4,20 @@ AND the accurancy for each client improved"""
 
 import argparse
 from collections import OrderedDict
-from pathlib import Path
 
 import flwr as fl
-import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, random_split, Subset
-from torchvision import datasets, transforms
 
-
-# -----------------------------
-#  PyTorch model
-# -----------------------------
-class Net(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.conv1 = nn.Conv2d(1, 16, 3, 1)
-        self.conv2 = nn.Conv2d(16, 32, 3, 1)
-        self.fc1 = nn.Linear(4608, 64)
-        self.fc2 = nn.Linear(64, 10)
-
-    def forward(self, x):
-        x = F.relu(self.conv1(x))      # [batch, 16, 26, 26]
-        x = F.relu(self.conv2(x))      # [batch, 32, 24, 24]
-        x = F.max_pool2d(x, 2)         # [batch, 32, 12, 12]
-        x = torch.flatten(x, 1)        # [batch, 4608]
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
+from split_learning_utils import (
+    FullNet,
+    client_size,
+    fedavg_state_dicts,
+    load_data,
+    load_split_checkpoint,
+    save_split_checkpoint,
+    set_seed,
+)
 
 
 # -----------------------------
@@ -92,45 +76,6 @@ def set_parameters(model, parameters):
 
 
 # -----------------------------
-# Load and split MNIST dataset
-# -----------------------------
-def load_data(client_id, num_clients):
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,))
-    ])
-
-    trainset = datasets.MNIST(
-        root="./data",
-        train=True,
-        download=True,
-        transform=transform
-    )
-
-    testset = datasets.MNIST(
-        root="./data",
-        train=False,
-        download=True,
-        transform=transform
-    )
-
-    # IID split: split MNIST equally among clients
-    num_examples = len(trainset)
-    indices = np.arange(num_examples)
-
-    np.random.seed(42)
-    np.random.shuffle(indices)
-
-    client_indices = np.array_split(indices, num_clients)[client_id]
-    client_trainset = Subset(trainset, client_indices)
-
-    trainloader = DataLoader(client_trainset, batch_size=32, shuffle=True)
-    testloader = DataLoader(testset, batch_size=128, shuffle=False)
-
-    return trainloader, testloader
-
-
-# -----------------------------
 # Flower client
 # -----------------------------
 class FlowerClient(fl.client.NumPyClient):
@@ -138,7 +83,7 @@ class FlowerClient(fl.client.NumPyClient):
         self.client_id = client_id
         self.device = device
 
-        self.model = Net().to(device)
+        self.model = FullNet().to(device)
         self.trainloader, self.testloader = load_data(client_id, num_clients)
 
     def get_parameters(self, config):
@@ -196,33 +141,33 @@ def aggregate_parameters(results):
     return aggregated
 
 
-def load_checkpoint(checkpoint_path, model, device):
-    if not checkpoint_path:
+def load_checkpoint(checkpoint_path, model, num_clients, device):
+    client_states, server_state = load_split_checkpoint(
+        checkpoint_path,
+        num_clients,
+        device,
+    )
+    if client_states is None:
         return
 
-    path = Path(checkpoint_path)
-    if not path.exists():
-        return
-
-    checkpoint = torch.load(path, map_location=device)
-    model.load_state_dict(checkpoint["model"])
-    print(f"Loaded checkpoint: {path}")
+    sizes = [client_size(num_clients, client_id) for client_id in range(num_clients)]
+    model.client_model.load_state_dict(fedavg_state_dicts(client_states, sizes))
+    model.server_model.load_state_dict(server_state)
 
 
-def save_checkpoint(checkpoint_path, model):
-    if not checkpoint_path:
-        return
-
-    path = Path(checkpoint_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"model": model.state_dict()}, path)
-    print(f"Saved checkpoint: {path}")
+def save_checkpoint(checkpoint_path, model, num_clients):
+    client_states = [
+        model.client_model.state_dict()
+        for _ in range(num_clients)
+    ]
+    save_split_checkpoint(checkpoint_path, client_states, model.server_model)
 
 
 def start_simulation(num_clients, num_rounds, checkpoint_path=""):
+    set_seed()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    global_model = Net().to(device)
-    load_checkpoint(checkpoint_path, global_model, device)
+    global_model = FullNet().to(device)
+    load_checkpoint(checkpoint_path, global_model, num_clients, device)
     global_parameters = get_parameters(global_model)
 
     print(f"Device: {device}")
@@ -266,7 +211,7 @@ def start_simulation(num_clients, num_rounds, checkpoint_path=""):
         print(f"Average test acc:  {avg_accuracy * 100:.2f}%")
 
     print("\nTraining finished.")
-    save_checkpoint(checkpoint_path, global_model)
+    save_checkpoint(checkpoint_path, global_model, num_clients)
 
 
 def parse_args():
