@@ -8,7 +8,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 
-from flower_split_message import run_message_local, run_message_simulation
+from flower_split_message import run_message_simulation
 
 
 # ============================================================
@@ -259,9 +259,9 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
-        choices=("local", "message-local", "message-simulation"),
+        choices=("local", "message-simulation"),
         default="local",
-        help="Run the original loop, local Flower Message API, or Ray simulation.",
+        help="Run the original loop or Flower Message API Ray simulation.",
     )
     parser.add_argument("--num-clients", type=int, default=3)
     parser.add_argument("--num-rounds", type=int, default=5)
@@ -282,13 +282,8 @@ def main():
     if args.num_clients < 1:
         raise ValueError("--num-clients must be at least 1")
 
-    if args.mode in ("message-local", "message-simulation"):
-        runner = (
-            run_message_local
-            if args.mode == "message-local"
-            else run_message_simulation
-        )
-        runner(
+    if args.mode == "message-simulation":
+        run_message_simulation(
             client_model_cls=ClientNet,
             server_model_cls=ServerNet,
             num_clients=args.num_clients,

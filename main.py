@@ -60,7 +60,7 @@ def parse_args():
     parser.add_argument("--fl-mode", choices=("simulation", "server", "client"), default="simulation")
     parser.add_argument(
         "--split-mode",
-        choices=("local", "message-local", "message-simulation"),
+        choices=("local", "message-simulation"),
         default="local",
         help="Execution mode for SL/SFL scripts.",
     )
