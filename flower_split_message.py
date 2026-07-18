@@ -1,5 +1,5 @@
 import math
-from typing import Type
+from typing import Callable, Type
 
 import torch
 from flwr.app.message import (
@@ -13,14 +13,6 @@ from flwr.clientapp import ClientApp
 from flwr.serverapp import ServerApp
 from flwr.simulation import run_simulation
 from torch import nn
-
-from split_learning_utils import (
-    client_size,
-    fedavg_state_dicts,
-    get_batch,
-    set_seed,
-)
-
 
 def model_to_record(model):
     return ArrayRecord.from_torch_state_dict(model.state_dict())
@@ -40,7 +32,10 @@ def load_model_from_state(context, state_key, model_cls, device):
     return model
 
 #parameter input， model instance output
-def make_client_app(client_model_cls: Type[nn.Module]):
+def make_client_app(
+    client_model_cls: Type[nn.Module],
+    get_batch_fn: Callable,
+):
     app = ClientApp()
 
     @app.train("forward")
@@ -56,7 +51,7 @@ def make_client_app(client_model_cls: Type[nn.Module]):
             context, "client_model", client_model_cls, device
         )
         client_model.train()
-        x, y = get_batch(client_id, num_clients, batch_index, batch_size, device)
+        x, y = get_batch_fn(client_id, num_clients, batch_index, batch_size, device)
 
         with torch.no_grad():
             activation = client_model(x)
@@ -87,7 +82,7 @@ def make_client_app(client_model_cls: Type[nn.Module]):
         )
         client_model.train()
         optimizer = torch.optim.SGD(client_model.parameters(), lr=lr_client)
-        x, _ = get_batch(client_id, num_clients, batch_index, batch_size, device)
+        x, _ = get_batch_fn(client_id, num_clients, batch_index, batch_size, device)
         grad = torch.tensor(
             message.content["gradient"].to_numpy_ndarrays()[0],
             device=device,
@@ -126,6 +121,12 @@ def make_client_app(client_model_cls: Type[nn.Module]):
 def make_server_app(
     client_model_cls: Type[nn.Module],
     server_model_cls: Type[nn.Module],
+    set_seed_fn: Callable,
+    client_size_fn: Callable,
+    fedavg_fn: Callable,
+    initial_client_states: list | None,
+    initial_server_state: dict | None,
+    on_finished_fn: Callable | None,
     num_clients: int,
     num_rounds: int,
     local_epochs: int,
@@ -139,9 +140,11 @@ def make_server_app(
 
     @app.main()
     def main(grid, context):
-        set_seed()
+        set_seed_fn()
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         server_model = server_model_cls().to(device)
+        if initial_server_state is not None:
+            server_model.load_state_dict(initial_server_state)
         server_optimizer = torch.optim.SGD(server_model.parameters(), lr=lr_server)#Stochastic Gradient Descent
         criterion = nn.CrossEntropyLoss()
         #which nodes are online，polling all clients
@@ -151,7 +154,19 @@ def make_server_app(
                 f"Expected {num_clients} clients, but only {len(node_ids)} are available"
             )
         node_ids = node_ids[:num_clients]
-        sizes = [client_size(num_clients, cid) for cid in range(num_clients)]
+        sizes = [client_size_fn(num_clients, cid) for cid in range(num_clients)]
+
+        if initial_client_states is not None:
+            for node_id, client_state in zip(node_ids, initial_client_states):
+                msg = grid.create_message(
+                    RecordDict({
+                        "client_model": ArrayRecord.from_torch_state_dict(client_state)
+                    }),
+                    message_type="train.set_params",
+                    dst_node_id=node_id,
+                    group_id="load-client-params",
+                )
+                list(grid.send_and_receive([msg]))
 
         print(f"Device: {device}")
         print(f"Number of clients: {num_clients}")
@@ -248,7 +263,7 @@ def make_server_app(
                     for reply in param_replies
                 ]
                 #get the average value
-                avg_state = fedavg_state_dicts(client_states, sizes)
+                avg_state = fedavg_fn(client_states, sizes)
                 #switch the dict form into message form
                 avg_record = ArrayRecord.from_torch_state_dict(avg_state)
 
@@ -269,6 +284,22 @@ def make_server_app(
             print(f"Average train acc:  {total_correct / total_examples * 100:.2f}%")
 
         print("\nTraining finished.")
+        if on_finished_fn is not None:
+            param_replies = []
+            for node_id in node_ids:
+                msg = grid.create_message(
+                    RecordDict({}),
+                    message_type="train.get_params",
+                    dst_node_id=node_id,
+                    group_id="save-client-params",
+                )
+                param_replies.append(list(grid.send_and_receive([msg]))[0])
+
+            client_states = [
+                record_to_state_dict(reply.content["client_model"])
+                for reply in param_replies
+            ]
+            on_finished_fn(client_states, server_model)
 
     return app
 
@@ -276,6 +307,10 @@ def make_server_app(
 def run_message_simulation(
     client_model_cls: Type[nn.Module],
     server_model_cls: Type[nn.Module],
+    set_seed_fn: Callable,
+    client_size_fn: Callable,
+    get_batch_fn: Callable,
+    fedavg_fn: Callable,
     num_clients: int,
     num_rounds: int,
     local_epochs: int,
@@ -285,10 +320,14 @@ def run_message_simulation(
     use_client_fedavg: bool,
     num_cpus: float,
     num_gpus: float,
+    initial_client_states: list | None = None,
+    initial_server_state: dict | None = None,
+    on_finished_fn: Callable | None = None,
     max_batches: int | None = None,
 ):
+    print("Checking Flower simulation backend...", flush=True)
     try:
-        import ray  # noqa: F401
+        import ray
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             "Flower message-simulation requires the Ray backend, but `ray` is "
@@ -297,9 +336,26 @@ def run_message_simulation(
             "wheel, or run this in WSL2."
         ) from exc
 
+    try:
+        ray.init(num_cpus=max(1, int(num_clients * num_cpus)), include_dashboard=False)
+        ray.shutdown()
+    except Exception as exc:
+        raise RuntimeError(
+            "Flower message simulation could not start Ray. Training did not "
+            "start, so no round output was produced. Run this in WSL2/Linux or "
+            "use a Python/Ray version combination that starts Ray successfully "
+            "on this machine."
+        ) from exc
+
     server_app = make_server_app(
         client_model_cls=client_model_cls,
         server_model_cls=server_model_cls,
+        set_seed_fn=set_seed_fn,
+        client_size_fn=client_size_fn,
+        fedavg_fn=fedavg_fn,
+        initial_client_states=initial_client_states,
+        initial_server_state=initial_server_state,
+        on_finished_fn=on_finished_fn,
         num_clients=num_clients,
         num_rounds=num_rounds,
         local_epochs=local_epochs,
@@ -309,16 +365,18 @@ def run_message_simulation(
         use_client_fedavg=use_client_fedavg,
         max_batches=max_batches,
     )
-    client_app = make_client_app(client_model_cls)
+    client_app = make_client_app(client_model_cls, get_batch_fn)
     backend_config = {
         "client_resources": {
             "num_cpus": num_cpus,
             "num_gpus": num_gpus,
         }
     }
+    print("Starting Flower Message API simulation...", flush=True)
     run_simulation(
         server_app=server_app,
         client_app=client_app,
         num_supernodes=num_clients,
         backend_config=backend_config,
+        verbose_logging=True,
     )
