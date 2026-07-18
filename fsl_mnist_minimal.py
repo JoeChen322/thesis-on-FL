@@ -7,7 +7,6 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
-
 from flower_split_message import run_message_simulation
 
 
@@ -50,8 +49,7 @@ def split_dataset_iid(dataset, num_clients):
 
 class ClientNet(nn.Module):
     """
-    The first part of the model.
-    It sets on the client side.
+    on the client side.
     Input: MNIST image [1, 28, 28]
     Output: feature tensor
     """
@@ -69,14 +67,11 @@ class ClientNet(nn.Module):
         return self.features(x)
 
 
-# ============================================================
-# Server-side model
-# ============================================================
+# -------------Server-side model-------------
 
 class ServerNet(nn.Module):
     """
-    The second part of the model.
-    It stays on the server side.
+    on the server side.
     Input: activation from ClientNet
     Output: class logits
     """
@@ -96,16 +91,8 @@ class ServerNet(nn.Module):
         return self.classifier(x)
 
 
-# ============================================================
-# FedAvg for client-side models
-# ============================================================
-
+#---------------- FedAvg for client-side models-----------------
 def fedavg(state_dicts, sizes):
-    """
-    Weighted FedAvg.
-    state_dicts: list of client model parameters
-    sizes: number of samples on each client
-    """
     total_size = sum(sizes)
     avg_state = copy.deepcopy(state_dicts[0])
 
@@ -118,10 +105,7 @@ def fedavg(state_dicts, sizes):
     return avg_state
 
 
-# ============================================================
-# One client training under split learning
-# ============================================================
-
+# -------One client training under split learning----------
 def train_one_client(
     client_model,
     server_model,
@@ -144,24 +128,16 @@ def train_one_client(
         optimizer_client.zero_grad()
         optimizer_server.zero_grad()
 
-        # -------------------------------
         # Client-side forward
-        # -------------------------------
         activation = client_model(images)
 
         # In real FSL, activation is sent from client to server.
         # Here we simulate it in one process.
         smashed_data = activation.detach().requires_grad_(True)
-
-        # -------------------------------
         # Server-side forward
-        # -------------------------------
         outputs = server_model(smashed_data)
         loss = criterion(outputs, labels)
-
-        # -------------------------------
         # Server-side backward
-        # -------------------------------
         loss.backward()
 
         # Gradient w.r.t. activation.
@@ -169,15 +145,11 @@ def train_one_client(
         grad_to_client = smashed_data.grad.detach()
         optimizer_server.step()
 
-        # -------------------------------
         # Client-side backward
-        # -------------------------------
         activation.backward(grad_to_client)
         optimizer_client.step()
 
-        # -------------------------------
         # Statistics
-        # -------------------------------
         total_loss += loss.item() * labels.size(0)
         preds = outputs.argmax(dim=1)
         correct += (preds == labels).sum().item()
@@ -187,11 +159,7 @@ def train_one_client(
     accuracy = correct / total
     return avg_loss, accuracy
 
-
-# ============================================================
-# Evaluation
-# ============================================================
-
+# --------------Evaluation-----------------------
 def evaluate(client_model, server_model, dataloader, criterion):
     client_model.eval()
     server_model.eval()
@@ -252,12 +220,6 @@ def save_checkpoint(checkpoint_path, client_model, server_model):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--mode",
-        choices=("local", "message-simulation"),
-        default="local",
-        help="Run the original loop or Flower Message API Ray simulation.",
-    )
     parser.add_argument("--num-clients", type=int, default=3)
     parser.add_argument("--num-rounds", type=int, default=5)
     parser.add_argument("--local-epochs", type=int, default=1)
@@ -267,32 +229,27 @@ def parse_args():
     parser.add_argument("--max-batches", type=int, default=0)
     return parser.parse_args()
 
-
-# ============================================================
-# Main training process
-# ============================================================
-
+# -----------------Main training process-------------
 def main():
     args = parse_args()
     if args.num_clients < 1:
         raise ValueError("--num-clients must be at least 1")
 
-    if args.mode == "message-simulation":
-        run_message_simulation(
-            client_model_cls=ClientNet,
-            server_model_cls=ServerNet,
-            num_clients=args.num_clients,
-            num_rounds=args.num_rounds,
-            local_epochs=args.local_epochs,
-            batch_size=BATCH_SIZE,
-            lr_client=LR_CLIENT,
-            lr_server=LR_SERVER,
-            use_client_fedavg=True,
-            num_cpus=args.client_num_cpus,
-            num_gpus=args.client_num_gpus,
-            max_batches=args.max_batches or None,
-        )
-        return
+    run_message_simulation(
+        client_model_cls=ClientNet,
+        server_model_cls=ServerNet,
+        num_clients=args.num_clients,
+        num_rounds=args.num_rounds,
+        local_epochs=args.local_epochs,
+        batch_size=BATCH_SIZE,
+        lr_client=LR_CLIENT,
+        lr_server=LR_SERVER,
+        use_client_fedavg=True,
+        num_cpus=args.client_num_cpus,
+        num_gpus=args.client_num_gpus,
+        max_batches=args.max_batches or None,
+    )
+    return
 
     transform = transforms.Compose([
         transforms.ToTensor(),
@@ -328,7 +285,6 @@ def main():
 
     # Global client-side model
     global_client_model = ClientNet().to(device)
-
     # Shared server-side model
     server_model = ServerNet().to(device)
 

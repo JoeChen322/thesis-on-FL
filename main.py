@@ -57,21 +57,12 @@ def parse_args():
         default=".checkpoints",
         help="Directory used to save per-method checkpoints in adaptive mode.",
     )
-    parser.add_argument("--fl-mode", choices=("simulation", "server", "client"), default="simulation")
-    parser.add_argument(
-        "--split-mode",
-        choices=("local", "message-simulation"),
-        default="local",
-        help="Execution mode for SL/SFL scripts.",
-    )
     parser.add_argument(
         "--max-batches",
         type=int,
         default=0,
         help="Debug limit for SL/SFL batches per client. 0 means no limit.",
     )
-    parser.add_argument("--client-id", type=int, default=0)
-    parser.add_argument("--server-address", default="127.0.0.1:8080")
     return parser.parse_args()
 
 
@@ -102,16 +93,10 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
         command = [
             python_executable,
             str(project_root / "fl_mnist_minimal.py"),
-            "--mode",
-            args.fl_mode,
             "--num-clients",
             str(args.num_clients),
             "--num-rounds",
             str(num_rounds),
-            "--client-id",
-            str(args.client_id),
-            "--server-address",
-            args.server_address,
         ]
         if checkpoint_path is not None:
             command.extend(["--checkpoint-path", str(checkpoint_path)])
@@ -121,8 +106,6 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
         command = [
             python_executable,
             str(project_root / "fsl_mnist_minimal.py"),
-            "--mode",
-            args.split_mode,
             "--num-clients",
             str(args.num_clients),
             "--num-rounds",
@@ -138,8 +121,6 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
         command = [
             python_executable,
             str(project_root / "sl_mnist_minimal.py"),
-            "--mode",
-            args.split_mode,
             "--num-clients",
             str(args.num_clients),
             "--num-rounds",

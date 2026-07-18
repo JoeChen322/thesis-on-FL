@@ -185,7 +185,7 @@ def make_server_app(
                         forward_reply = list(
                             grid.send_and_receive([forward_msg])
                         )[0]
-
+                        #Sequentially processes clients, so only use[0]
                         activation = torch.tensor(
                             forward_reply.content["activation"].to_numpy_ndarrays()[0],
                             device=device,

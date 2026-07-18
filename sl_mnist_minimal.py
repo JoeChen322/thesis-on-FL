@@ -204,12 +204,6 @@ def save_checkpoint(checkpoint_path, client_models, server_model):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--mode",
-        choices=("local", "message-simulation"),
-        default="local",
-        help="Run the original loop or Flower Message API Ray simulation.",
-    )
     parser.add_argument("--num-clients", type=int, default=3)
     parser.add_argument("--num-rounds", type=int, default=10)
     parser.add_argument("--local-epochs", type=int, default=1)
@@ -225,22 +219,21 @@ def main():
     if args.num_clients < 1:
         raise ValueError("--num-clients must be at least 1")
 
-    if args.mode == "message-simulation":
-        run_message_simulation(
-            client_model_cls=ClientNet,
-            server_model_cls=ServerNet,
-            num_clients=args.num_clients,
-            num_rounds=args.num_rounds,
-            local_epochs=args.local_epochs,
-            batch_size=BATCH_SIZE,
-            lr_client=LR_CLIENT,
-            lr_server=LR_SERVER,
-            use_client_fedavg=False,
-            num_cpus=args.client_num_cpus,
-            num_gpus=args.client_num_gpus,
-            max_batches=args.max_batches or None,
-        )
-        return
+    run_message_simulation(
+        client_model_cls=ClientNet,
+        server_model_cls=ServerNet,
+        num_clients=args.num_clients,
+        num_rounds=args.num_rounds,
+        local_epochs=args.local_epochs,
+        batch_size=BATCH_SIZE,
+        lr_client=LR_CLIENT,
+        lr_server=LR_SERVER,
+        use_client_fedavg=False,
+        num_cpus=args.client_num_cpus,
+        num_gpus=args.client_num_gpus,
+        max_batches=args.max_batches or None,
+    )
+    return
 
     set_seed(SEED)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

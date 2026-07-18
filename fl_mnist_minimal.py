@@ -2,7 +2,6 @@
 the result is the loss getting decrease after several epochs
 AND the accurancy for each client improved"""
 
-import os
 import argparse
 from collections import OrderedDict
 from pathlib import Path
@@ -177,19 +176,6 @@ class FlowerClient(fl.client.NumPyClient):
         )
 
 
-# -----------------------------
-# Client
-# -----------------------------
-def client_fn(cid, num_clients=2):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    return FlowerClient(
-        client_id=int(cid),
-        num_clients=num_clients,
-        device=device,
-    ).to_client()
-
-
 def weighted_average(metrics):
     accuracies = [num_examples * m["accuracy"] for num_examples, m in metrics]
     examples = [num_examples for num_examples, _ in metrics]
@@ -231,34 +217,6 @@ def save_checkpoint(checkpoint_path, model):
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({"model": model.state_dict()}, path)
     print(f"Saved checkpoint: {path}")
-
-
-# -----------------------------
-# Start Flower server/client
-# -----------------------------
-def start_server(num_clients, num_rounds, server_address):
-    strategy = fl.server.strategy.FedAvg(
-        fraction_fit=1.0,
-        fraction_evaluate=1.0,
-        min_fit_clients=num_clients,
-        min_evaluate_clients=num_clients,
-        min_available_clients=num_clients,
-        evaluate_metrics_aggregation_fn=weighted_average,
-    )
-
-    fl.server.start_server(
-        server_address=server_address,
-        config=fl.server.ServerConfig(num_rounds=num_rounds),
-        strategy=strategy,
-    )
-
-
-def start_client(client_id, num_clients, server_address):
-    fl.client.start_client(
-        server_address=server_address,
-        client=client_fn(str(client_id), num_clients),
-        insecure=True,
-    )
 
 
 def start_simulation(num_clients, num_rounds, checkpoint_path=""):
@@ -313,26 +271,12 @@ def start_simulation(num_clients, num_rounds, checkpoint_path=""):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--mode",
-        choices=("server", "client", "simulation"),
-        default="server",
-        help="Run Flower as a server, a real client, or a Ray-based simulation.",
-    )
-    parser.add_argument("--client-id", type=int, default=0)
     parser.add_argument("--num-clients", type=int, default=2)
     parser.add_argument("--num-rounds", type=int, default=3)
-    parser.add_argument("--server-address", default="127.0.0.1:8080")
     parser.add_argument("--checkpoint-path", default="")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-
-    if args.mode == "server":
-        start_server(args.num_clients, args.num_rounds, args.server_address)
-    elif args.mode == "client":
-        start_client(args.client_id, args.num_clients, args.server_address)
-    else:
-        start_simulation(args.num_clients, args.num_rounds, args.checkpoint_path)
+    start_simulation(args.num_clients, args.num_rounds, args.checkpoint_path)
