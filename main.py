@@ -98,7 +98,20 @@ def parse_client_cpus(value, num_clients):
     return cpu_counts
 
 
+def simulation_client_num_cpus(args):
+    cpu_counts = parse_client_cpus(args.client_cpus, args.num_clients)
+    unique_cpu_counts = set(cpu_counts)
+    if len(unique_cpu_counts) != 1:
+        raise ValueError(
+            "Flower Ray simulation supports one CPU resource value for all clients; "
+            "use a single --client-cpus value, for example --client-cpus 4."
+        )
+    return float(cpu_counts[0])
+
+
 def build_command(args, project_root, python_executable, method, num_rounds, checkpoint_path=None):
+    client_num_cpus = simulation_client_num_cpus(args)
+
     if method == "fl":
         command = [
             python_executable,
@@ -107,6 +120,8 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
             str(args.num_clients),
             "--num-rounds",
             str(num_rounds),
+            "--client-num-cpus",
+            str(client_num_cpus),
         ]
         if checkpoint_path is not None:
             command.extend(["--checkpoint-path", str(checkpoint_path)])
@@ -120,6 +135,8 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
             str(args.num_clients),
             "--num-rounds",
             str(num_rounds),
+            "--client-num-cpus",
+            str(client_num_cpus),
         ]
         if checkpoint_path is not None:
             command.extend(["--checkpoint-path", str(checkpoint_path)])
@@ -135,6 +152,8 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
             str(args.num_clients),
             "--num-rounds",
             str(num_rounds),
+            "--client-num-cpus",
+            str(client_num_cpus),
         ]
         if checkpoint_path is not None:
             command.extend(["--checkpoint-path", str(checkpoint_path)])

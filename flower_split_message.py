@@ -336,8 +336,10 @@ def run_message_simulation(
             "wheel, or run this in WSL2."
         ) from exc
 
+    total_num_cpus = max(1, math.ceil(num_clients * num_cpus))
+
     try:
-        ray.init(num_cpus=max(1, int(num_clients * num_cpus)), include_dashboard=False)
+        ray.init(num_cpus=total_num_cpus, include_dashboard=False)
         ray.shutdown()
     except Exception as exc:
         raise RuntimeError(
@@ -367,6 +369,10 @@ def run_message_simulation(
     )
     client_app = make_client_app(client_model_cls, get_batch_fn)
     backend_config = {
+        "init_args": {
+            "num_cpus": total_num_cpus,
+            "include_dashboard": False,
+        },
         "client_resources": {
             "num_cpus": num_cpus,
             "num_gpus": num_gpus,

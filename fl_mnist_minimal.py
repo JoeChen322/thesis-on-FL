@@ -4,10 +4,16 @@ AND the accurancy for each client improved"""
 
 import argparse
 from collections import OrderedDict
+import math
 
 import flwr as fl
 import torch
 import torch.nn.functional as F
+from flwr.clientapp import ClientApp
+from flwr.common import ndarrays_to_parameters, parameters_to_ndarrays
+from flwr.server import ServerAppComponents, ServerConfig
+from flwr.serverapp import ServerApp
+from flwr.simulation import run_simulation
 
 from split_learning_utils import (
     FullNet,
@@ -95,7 +101,7 @@ class FlowerClient(fl.client.NumPyClient):
         train(
             model=self.model,
             trainloader=self.trainloader,
-            epochs=1,
+            epochs=int(config.get("local_epochs", 1)),
             device=self.device,
         )
 
@@ -117,7 +123,7 @@ class FlowerClient(fl.client.NumPyClient):
         return (
             float(loss),
             len(self.testloader.dataset),
-            {"accuracy": float(accuracy)},
+            {"accuracy": float(accuracy), "client_id": self.client_id},
         )
 
 
@@ -163,54 +169,142 @@ def save_checkpoint(checkpoint_path, model, num_clients):
     save_split_checkpoint(checkpoint_path, client_states, model.server_model)
 
 
-def start_simulation(num_clients, num_rounds, checkpoint_path=""):
+class ReportingFedAvg(fl.server.strategy.FedAvg):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.current_parameters = kwargs.get("initial_parameters")
+
+    def aggregate_fit(self, server_round, results, failures):
+        parameters, metrics = super().aggregate_fit(server_round, results, failures)
+        if parameters is not None:
+            self.current_parameters = parameters
+        return parameters, metrics
+
+    def aggregate_evaluate(self, server_round, results, failures):
+        print(f"\n========== Round {server_round} ==========")
+        for _, evaluate_res in sorted(
+            results,
+            key=lambda item: int(item[1].metrics.get("client_id", 0)),
+        ):
+            client_id = int(evaluate_res.metrics.get("client_id", -1))
+            accuracy = float(evaluate_res.metrics["accuracy"])
+            print(
+                f"Client {client_id}: "
+                f"test loss = {evaluate_res.loss:.4f}, "
+                f"test acc = {accuracy * 100:.2f}%"
+            )
+
+        loss, metrics = super().aggregate_evaluate(
+            server_round,
+            results,
+            failures,
+        )
+        if loss is not None and "accuracy" in metrics:
+            print("--------------------------------")
+            print(f"Round {server_round} summary:")
+            print(f"Average test loss: {loss:.4f}")
+            print(f"Average test acc:  {float(metrics['accuracy']) * 100:.2f}%")
+        return loss, metrics
+
+
+def make_client_app(num_clients):
+    def client_fn(context):
+        client_id = int(context.node_config["partition-id"])
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        return FlowerClient(client_id, num_clients, device).to_client()
+
+    return ClientApp(client_fn=client_fn)
+
+
+def make_server_app(num_rounds, num_clients, strategy):
+    def server_fn(context):
+        return ServerAppComponents(
+            config=ServerConfig(num_rounds=num_rounds),
+            strategy=strategy,
+        )
+
+    return ServerApp(server_fn=server_fn)
+
+
+def check_simulation_backend(num_clients, client_num_cpus):
+    print("Checking Flower simulation backend...", flush=True)
+    total_num_cpus = max(1, math.ceil(num_clients * client_num_cpus))
+    try:
+        import ray
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Flower simulation requires the Ray backend, but `ray` is not "
+            "installed for this Python environment. On Windows, Ray is not "
+            "available for all Python versions; use a Python version with a Ray "
+            "wheel, or run this in WSL2."
+        ) from exc
+
+    try:
+        ray.init(
+            num_cpus=total_num_cpus,
+            include_dashboard=False,
+        )
+        ray.shutdown()
+    except Exception as exc:
+        raise RuntimeError(
+            "Flower simulation could not start Ray. Training did not start, so "
+            "no round output was produced. Run this in WSL2/Linux or use a "
+            "Python/Ray version combination that starts Ray successfully on "
+            "this machine."
+        ) from exc
+
+
+def start_simulation(
+    num_clients,
+    num_rounds,
+    checkpoint_path="",
+    local_epochs=1,
+    client_num_cpus=1.0,
+    client_num_gpus=0.0,
+):
     set_seed()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     global_model = FullNet().to(device)
     load_checkpoint(checkpoint_path, global_model, num_clients, device)
-    global_parameters = get_parameters(global_model)
+    initial_parameters = ndarrays_to_parameters(get_parameters(global_model))
+    strategy = ReportingFedAvg(
+        fraction_fit=1.0,
+        fraction_evaluate=1.0,
+        min_fit_clients=num_clients,
+        min_evaluate_clients=num_clients,
+        min_available_clients=num_clients,
+        initial_parameters=initial_parameters,
+        on_fit_config_fn=lambda _: {"local_epochs": local_epochs},
+        evaluate_metrics_aggregation_fn=weighted_average,
+    )
 
     print(f"Device: {device}")
     print(f"Number of clients: {num_clients}")
-    print("Start local FL simulation")
+    print("Start Flower FL simulation")
 
-    for round_idx in range(1, num_rounds + 1):
-        print(f"\n========== Round {round_idx} ==========")
-
-        fit_results = []
-        eval_results = []
-
-        for client_id in range(num_clients):
-            client = FlowerClient(client_id, num_clients, device)
-            parameters, num_examples, _ = client.fit(global_parameters, {})
-            fit_results.append((parameters, num_examples))
-
-            loss, test_examples, metrics = client.evaluate(parameters, {})
-            eval_results.append((test_examples, {"loss": loss, **metrics}))
-
-            print(
-                f"Client {client_id}: "
-                f"test loss = {loss:.4f}, "
-                f"test acc = {metrics['accuracy'] * 100:.2f}%"
-            )
-
-        global_parameters = aggregate_parameters(fit_results)
-        set_parameters(global_model, global_parameters)
-        avg_loss = sum(num_examples * m["loss"] for num_examples, m in eval_results)
-        avg_loss /= sum(num_examples for num_examples, _ in eval_results)
-        avg_accuracy = weighted_average(
-            [
-                (num_examples, {"accuracy": metrics["accuracy"]})
-                for num_examples, metrics in eval_results
-            ]
-        )["accuracy"]
-
-        print("--------------------------------")
-        print(f"Round {round_idx} summary:")
-        print(f"Average test loss: {avg_loss:.4f}")
-        print(f"Average test acc:  {avg_accuracy * 100:.2f}%")
+    check_simulation_backend(num_clients, client_num_cpus)
+    total_num_cpus = max(1, math.ceil(num_clients * client_num_cpus))
+    backend_config = {
+        "init_args": {
+            "num_cpus": total_num_cpus,
+            "include_dashboard": False,
+        },
+        "client_resources": {
+            "num_cpus": client_num_cpus,
+            "num_gpus": client_num_gpus,
+        }
+    }
+    run_simulation(
+        server_app=make_server_app(num_rounds, num_clients, strategy),
+        client_app=make_client_app(num_clients),
+        num_supernodes=num_clients,
+        backend_config=backend_config,
+        verbose_logging=True,
+    )
 
     print("\nTraining finished.")
+    if strategy.current_parameters is not None:
+        set_parameters(global_model, parameters_to_ndarrays(strategy.current_parameters))
     save_checkpoint(checkpoint_path, global_model, num_clients)
 
 
@@ -218,10 +312,22 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--num-clients", type=int, default=2)
     parser.add_argument("--num-rounds", type=int, default=3)
+    parser.add_argument("--local-epochs", type=int, default=1)
     parser.add_argument("--checkpoint-path", default="")
+    parser.add_argument("--client-num-cpus", type=float, default=1.0)
+    parser.add_argument("--client-num-gpus", type=float, default=0.0)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    start_simulation(args.num_clients, args.num_rounds, args.checkpoint_path)
+    if args.num_clients < 1:
+        raise ValueError("--num-clients must be at least 1")
+    start_simulation(
+        args.num_clients,
+        args.num_rounds,
+        args.checkpoint_path,
+        args.local_epochs,
+        args.client_num_cpus,
+        args.client_num_gpus,
+    )
