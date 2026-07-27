@@ -33,6 +33,12 @@ def parse_args():
     parser.add_argument("--client-num-cpus", type=float, default=1.0)
     parser.add_argument("--client-num-gpus", type=float, default=0.0)
     parser.add_argument("--max-batches", type=int, default=0)
+    parser.add_argument(
+        "--noniid-alpha",
+        type=float,
+        default=1.0,
+        help="Shared Dirichlet non-IID degree in [0, 1]. 1.0 keeps IID splitting.",
+    )
     return parser.parse_args()
 
 # -----------------Main training process-------------
@@ -45,17 +51,32 @@ def main():
         args.checkpoint_path,
         args.num_clients,
         device,
+        args.noniid_alpha,
     )
     on_finished_fn = None
     if args.checkpoint_path:
-        on_finished_fn = partial(save_split_checkpoint, args.checkpoint_path)
+        on_finished_fn = partial(
+            save_split_checkpoint,
+            args.checkpoint_path,
+            num_clients=args.num_clients,
+            noniid_alpha=args.noniid_alpha,
+        )
+
+    message_client_size_with_alpha = partial(
+        message_client_size,
+        noniid_alpha=args.noniid_alpha,
+    )
+    message_get_batch_with_alpha = partial(
+        message_get_batch,
+        noniid_alpha=args.noniid_alpha,
+    )
 
     run_message_simulation(
         client_model_cls=ClientNet,
         server_model_cls=ServerNet,
         set_seed_fn=set_seed,
-        client_size_fn=message_client_size,
-        get_batch_fn=message_get_batch,
+        client_size_fn=message_client_size_with_alpha,
+        get_batch_fn=message_get_batch_with_alpha,
         fedavg_fn=fedavg,
         num_clients=args.num_clients,
         num_rounds=args.num_rounds,

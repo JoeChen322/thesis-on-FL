@@ -63,6 +63,12 @@ def parse_args():
         help="Shared checkpoint path used by FL/SL/SFL. Defaults to checkpoint-dir/shared_<num-clients>clients_checkpoint.pt.",
     )
     parser.add_argument(
+        "--noniid-alpha",
+        type=float,
+        default=1.0,
+        help="Shared Dirichlet non-IID degree in [0, 1]. 1.0 keeps IID splitting.",
+    )
+    parser.add_argument(
         "--max-batches",
         type=int,
         default=0,
@@ -111,6 +117,8 @@ def simulation_client_num_cpus(args):
 
 def build_command(args, project_root, python_executable, method, num_rounds, checkpoint_path=None):
     client_num_cpus = simulation_client_num_cpus(args)
+    if args.noniid_alpha < 0.0 or args.noniid_alpha > 1.0:
+        raise ValueError("--noniid-alpha must be in the range [0, 1]")
 
     if method == "fl":
         command = [
@@ -125,6 +133,7 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
         ]
         if checkpoint_path is not None:
             command.extend(["--checkpoint-path", str(checkpoint_path)])
+        command.extend(["--noniid-alpha", str(args.noniid_alpha)])
         return command
 
     if method == "sfl":
@@ -140,6 +149,7 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
         ]
         if checkpoint_path is not None:
             command.extend(["--checkpoint-path", str(checkpoint_path)])
+        command.extend(["--noniid-alpha", str(args.noniid_alpha)])
         if args.max_batches:
             command.extend(["--max-batches", str(args.max_batches)])
         return command
@@ -157,6 +167,7 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
         ]
         if checkpoint_path is not None:
             command.extend(["--checkpoint-path", str(checkpoint_path)])
+        command.extend(["--noniid-alpha", str(args.noniid_alpha)])
         if args.max_batches:
             command.extend(["--max-batches", str(args.max_batches)])
         return command
@@ -227,6 +238,7 @@ def run_once(args, project_root, python_executable, method, selection_reason):
 
     print(f"Selected method: {method.upper()} for {args.num_clients} clients", flush=True)
     print(f"Selection reason: {selection_reason}", flush=True)
+    print(f"Shared non-IID alpha: {args.noniid_alpha}", flush=True)
     print(f"Using Python: {python_executable}", flush=True)
     run_command(
         command,
@@ -241,6 +253,7 @@ def run_with_adaptive_switch(args, project_root, python_executable, method, sele
 
     print(f"Initial method: {method.upper()} for {args.num_clients} clients", flush=True)
     print(f"Initial selection reason: {selection_reason}", flush=True)
+    print(f"Shared non-IID alpha: {args.noniid_alpha}", flush=True)
     print(f"Using Python: {python_executable}", flush=True)
     print(
         "Adaptive rule: switch when communication time grows "

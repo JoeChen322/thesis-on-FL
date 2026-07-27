@@ -85,12 +85,16 @@ def set_parameters(model, parameters):
 # Flower client
 # -----------------------------
 class FlowerClient(fl.client.NumPyClient):
-    def __init__(self, client_id, num_clients, device):
+    def __init__(self, client_id, num_clients, device, noniid_alpha):
         self.client_id = client_id
         self.device = device
 
         self.model = FullNet().to(device)
-        self.trainloader, self.testloader = load_data(client_id, num_clients)
+        self.trainloader, self.testloader = load_data(
+            client_id,
+            num_clients,
+            noniid_alpha=noniid_alpha,
+        )
 
     def get_parameters(self, config):
         return get_parameters(self.model)
@@ -147,26 +151,36 @@ def aggregate_parameters(results):
     return aggregated
 
 
-def load_checkpoint(checkpoint_path, model, num_clients, device):
+def load_checkpoint(checkpoint_path, model, num_clients, device, noniid_alpha):
     client_states, server_state = load_split_checkpoint(
         checkpoint_path,
         num_clients,
         device,
+        noniid_alpha,
     )
     if client_states is None:
         return
 
-    sizes = [client_size(num_clients, client_id) for client_id in range(num_clients)]
+    sizes = [
+        client_size(num_clients, client_id, noniid_alpha)
+        for client_id in range(num_clients)
+    ]
     model.client_model.load_state_dict(fedavg_state_dicts(client_states, sizes))
     model.server_model.load_state_dict(server_state)
 
 
-def save_checkpoint(checkpoint_path, model, num_clients):
+def save_checkpoint(checkpoint_path, model, num_clients, noniid_alpha):
     client_states = [
         model.client_model.state_dict()
         for _ in range(num_clients)
     ]
-    save_split_checkpoint(checkpoint_path, client_states, model.server_model)
+    save_split_checkpoint(
+        checkpoint_path,
+        client_states,
+        model.server_model,
+        num_clients,
+        noniid_alpha,
+    )
 
 
 class ReportingFedAvg(fl.server.strategy.FedAvg):
@@ -207,11 +221,11 @@ class ReportingFedAvg(fl.server.strategy.FedAvg):
         return loss, metrics
 
 
-def make_client_app(num_clients):
+def make_client_app(num_clients, noniid_alpha):
     def client_fn(context):
         client_id = int(context.node_config["partition-id"])
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        return FlowerClient(client_id, num_clients, device).to_client()
+        return FlowerClient(client_id, num_clients, device, noniid_alpha).to_client()
 
     return ClientApp(client_fn=client_fn)
 
@@ -261,11 +275,12 @@ def start_simulation(
     local_epochs=1,
     client_num_cpus=1.0,
     client_num_gpus=0.0,
+    noniid_alpha=1.0,
 ):
     set_seed()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     global_model = FullNet().to(device)
-    load_checkpoint(checkpoint_path, global_model, num_clients, device)
+    load_checkpoint(checkpoint_path, global_model, num_clients, device, noniid_alpha)
     initial_parameters = ndarrays_to_parameters(get_parameters(global_model))
     strategy = ReportingFedAvg(
         fraction_fit=1.0,
@@ -280,6 +295,7 @@ def start_simulation(
 
     print(f"Device: {device}")
     print(f"Number of clients: {num_clients}")
+    print(f"Non-IID alpha: {noniid_alpha}")
     print("Start Flower FL simulation")
 
     check_simulation_backend(num_clients, client_num_cpus)
@@ -296,7 +312,7 @@ def start_simulation(
     }
     run_simulation(
         server_app=make_server_app(num_rounds, num_clients, strategy),
-        client_app=make_client_app(num_clients),
+        client_app=make_client_app(num_clients, noniid_alpha),
         num_supernodes=num_clients,
         backend_config=backend_config,
         verbose_logging=True,
@@ -305,7 +321,7 @@ def start_simulation(
     print("\nTraining finished.")
     if strategy.current_parameters is not None:
         set_parameters(global_model, parameters_to_ndarrays(strategy.current_parameters))
-    save_checkpoint(checkpoint_path, global_model, num_clients)
+    save_checkpoint(checkpoint_path, global_model, num_clients, noniid_alpha)
 
 
 def parse_args():
@@ -316,6 +332,12 @@ def parse_args():
     parser.add_argument("--checkpoint-path", default="")
     parser.add_argument("--client-num-cpus", type=float, default=1.0)
     parser.add_argument("--client-num-gpus", type=float, default=0.0)
+    parser.add_argument(
+        "--noniid-alpha",
+        type=float,
+        default=1.0,
+        help="Shared Dirichlet non-IID degree in [0, 1]. 1.0 keeps IID splitting.",
+    )
     return parser.parse_args()
 
 
@@ -330,4 +352,5 @@ if __name__ == "__main__":
         args.local_epochs,
         args.client_num_cpus,
         args.client_num_gpus,
+        args.noniid_alpha,
     )
