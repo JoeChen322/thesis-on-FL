@@ -14,6 +14,8 @@ from flwr.serverapp import ServerApp
 from flwr.simulation import run_simulation
 from torch import nn
 
+from split_learning_utils import check_simulation_backend
+
 def model_to_record(model):
     return ArrayRecord.from_torch_state_dict(model.state_dict())
 
@@ -127,6 +129,8 @@ def make_server_app(
     initial_client_states: list | None,
     initial_server_state: dict | None,
     on_finished_fn: Callable | None,
+    evaluate_fn: Callable | None,
+    print_metrics_fn: Callable | None,
     num_clients: int,
     num_rounds: int,
     local_epochs: int,
@@ -135,6 +139,7 @@ def make_server_app(
     lr_server: float,
     use_client_fedavg: bool,
     max_batches: int | None,
+    eval_every_round: bool,
 ):
     app = ServerApp()
 
@@ -155,6 +160,60 @@ def make_server_app(
             )
         node_ids = node_ids[:num_clients]
         sizes = [client_size_fn(num_clients, cid) for cid in range(num_clients)]
+
+        def get_client_states(group_id):
+            param_replies = []
+            for node_id in node_ids:
+                msg = grid.create_message(
+                    RecordDict({}),
+                    message_type="train.get_params",
+                    dst_node_id=node_id,
+                    group_id=group_id,
+                )
+                param_replies.append(list(grid.send_and_receive([msg]))[0])
+            return [
+                record_to_state_dict(reply.content["client_model"])
+                for reply in param_replies
+            ]
+
+        def evaluate_current_models(label):
+            if evaluate_fn is None:
+                return
+
+            group_label = label.lower().replace(" ", "-")
+            client_states = get_client_states(f"{group_label}-eval-client-params")
+            states_to_evaluate = (
+                client_states[:1]
+                if use_client_fedavg
+                else client_states
+            )
+            losses = []
+            accuracies = []
+            for client_id, client_state in enumerate(states_to_evaluate):
+                client_model = client_model_cls().to(device)
+                client_model.load_state_dict(client_state)
+                loss, accuracy = evaluate_fn(client_model, server_model, device)
+                losses.append(loss)
+                accuracies.append(accuracy)
+                if len(states_to_evaluate) > 1:
+                    if print_metrics_fn is None:
+                        print(f"{label} client {client_id} test loss: {loss:.4f}")
+                        print(f"{label} client {client_id} test acc:  {accuracy * 100:.2f}%")
+                    else:
+                        print_metrics_fn(f"{label} client {client_id}", loss, accuracy)
+
+            avg_loss = sum(losses) / len(losses)
+            avg_accuracy = sum(accuracies) / len(accuracies)
+            metric_label = (
+                label
+                if len(states_to_evaluate) == 1
+                else f"{label} average"
+            )
+            if print_metrics_fn is None:
+                print(f"{metric_label} test loss: {avg_loss:.4f}")
+                print(f"{metric_label} test acc:  {avg_accuracy * 100:.2f}%")
+            else:
+                print_metrics_fn(metric_label, avg_loss, avg_accuracy)
 
         if initial_client_states is not None:
             for node_id, client_state in zip(node_ids, initial_client_states):
@@ -248,20 +307,7 @@ def make_server_app(
                 print(f"Client {client_id} -> server: finished {num_batches} batches")
 
             if use_client_fedavg:
-                param_replies = []
-                for node_id in node_ids:
-                    msg = grid.create_message(
-                        RecordDict({}),
-                        message_type="train.get_params",
-                        dst_node_id=node_id,
-                        group_id=f"{round_idx}-get-client-params",
-                    )
-                    param_replies.append(list(grid.send_and_receive([msg]))[0])
-
-                client_states = [
-                    record_to_state_dict(reply.content["client_model"])
-                    for reply in param_replies
-                ]
+                client_states = get_client_states(f"{round_idx}-get-client-params")
                 #get the average value
                 avg_state = fedavg_fn(client_states, sizes)
                 #switch the dict form into message form
@@ -282,23 +328,13 @@ def make_server_app(
             print(f"Round {round_idx} summary:")
             print(f"Average train loss: {total_loss / total_examples:.4f}")
             print(f"Average train acc:  {total_correct / total_examples * 100:.2f}%")
+            if eval_every_round:
+                evaluate_current_models(f"Round {round_idx}")
 
         print("\nTraining finished.")
+        evaluate_current_models("Final")
         if on_finished_fn is not None:
-            param_replies = []
-            for node_id in node_ids:
-                msg = grid.create_message(
-                    RecordDict({}),
-                    message_type="train.get_params",
-                    dst_node_id=node_id,
-                    group_id="save-client-params",
-                )
-                param_replies.append(list(grid.send_and_receive([msg]))[0])
-
-            client_states = [
-                record_to_state_dict(reply.content["client_model"])
-                for reply in param_replies
-            ]
+            client_states = get_client_states("save-client-params")
             on_finished_fn(client_states, server_model)
 
     return app
@@ -323,31 +359,16 @@ def run_message_simulation(
     initial_client_states: list | None = None,
     initial_server_state: dict | None = None,
     on_finished_fn: Callable | None = None,
+    evaluate_fn: Callable | None = None,
+    print_metrics_fn: Callable | None = None,
     max_batches: int | None = None,
+    eval_every_round: bool = False,
 ):
-    print("Checking Flower simulation backend...", flush=True)
-    try:
-        import ray
-    except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "Flower message-simulation requires the Ray backend, but `ray` is "
-            "not installed for this Python environment. On Windows, Ray is not "
-            "available for all Python versions; use a Python version with a Ray "
-            "wheel, or run this in WSL2."
-        ) from exc
-
-    total_num_cpus = max(1, math.ceil(num_clients * num_cpus))
-
-    try:
-        ray.init(num_cpus=total_num_cpus, include_dashboard=False)
-        ray.shutdown()
-    except Exception as exc:
-        raise RuntimeError(
-            "Flower message simulation could not start Ray. Training did not "
-            "start, so no round output was produced. Run this in WSL2/Linux or "
-            "use a Python/Ray version combination that starts Ray successfully "
-            "on this machine."
-        ) from exc
+    total_num_cpus = check_simulation_backend(
+        num_clients,
+        num_cpus,
+        simulation_name="Flower message simulation",
+    )
 
     server_app = make_server_app(
         client_model_cls=client_model_cls,
@@ -358,6 +379,8 @@ def run_message_simulation(
         initial_client_states=initial_client_states,
         initial_server_state=initial_server_state,
         on_finished_fn=on_finished_fn,
+        evaluate_fn=evaluate_fn,
+        print_metrics_fn=print_metrics_fn,
         num_clients=num_clients,
         num_rounds=num_rounds,
         local_epochs=local_epochs,
@@ -366,6 +389,7 @@ def run_message_simulation(
         lr_server=lr_server,
         use_client_fedavg=use_client_fedavg,
         max_batches=max_batches,
+        eval_every_round=eval_every_round,
     )
     client_app = make_client_app(client_model_cls, get_batch_fn)
     backend_config = {

@@ -4,7 +4,6 @@ AND the accurancy for each client improved"""
 
 import argparse
 from collections import OrderedDict
-import math
 
 import flwr as fl
 import torch
@@ -15,8 +14,10 @@ from flwr.server import ServerAppComponents, ServerConfig
 from flwr.serverapp import ServerApp
 from flwr.simulation import run_simulation
 
+from mnist_evaluation import evaluate_model, print_test_metrics
 from split_learning_utils import (
     FullNet,
+    check_simulation_backend,
     client_size,
     fedavg_state_dicts,
     load_data,
@@ -42,28 +43,6 @@ def train(model, trainloader, epochs, device):
             loss = F.cross_entropy(output, y)
             loss.backward()
             optimizer.step()
-
-
-def test(model, testloader, device):
-    model.eval()
-    loss = 0.0
-    correct = 0
-    total = 0
-
-    with torch.no_grad():
-        for x, y in testloader:
-            x, y = x.to(device), y.to(device)
-
-            output = model(x)
-            loss += F.cross_entropy(output, y, reduction="sum").item()
-
-            pred = output.argmax(dim=1)
-            correct += (pred == y).sum().item()
-            total += y.size(0)
-
-    loss /= total
-    accuracy = correct / total
-    return loss, accuracy
 
 
 # -----------------------------
@@ -118,7 +97,7 @@ class FlowerClient(fl.client.NumPyClient):
     def evaluate(self, parameters, config):
         set_parameters(self.model, parameters)
 
-        loss, accuracy = test(
+        loss, accuracy = evaluate_model(
             model=self.model,
             testloader=self.testloader,
             device=self.device,
@@ -216,8 +195,7 @@ class ReportingFedAvg(fl.server.strategy.FedAvg):
         if loss is not None and "accuracy" in metrics:
             print("--------------------------------")
             print(f"Round {server_round} summary:")
-            print(f"Average test loss: {loss:.4f}")
-            print(f"Average test acc:  {float(metrics['accuracy']) * 100:.2f}%")
+            print_test_metrics("Average", loss, float(metrics["accuracy"]))
         return loss, metrics
 
 
@@ -238,34 +216,6 @@ def make_server_app(num_rounds, num_clients, strategy):
         )
 
     return ServerApp(server_fn=server_fn)
-
-
-def check_simulation_backend(num_clients, client_num_cpus):
-    print("Checking Flower simulation backend...", flush=True)
-    total_num_cpus = max(1, math.ceil(num_clients * client_num_cpus))
-    try:
-        import ray
-    except ModuleNotFoundError as exc:
-        raise RuntimeError(
-            "Flower simulation requires the Ray backend, but `ray` is not "
-            "installed for this Python environment. On Windows, Ray is not "
-            "available for all Python versions; use a Python version with a Ray "
-            "wheel, or run this in WSL2."
-        ) from exc
-
-    try:
-        ray.init(
-            num_cpus=total_num_cpus,
-            include_dashboard=False,
-        )
-        ray.shutdown()
-    except Exception as exc:
-        raise RuntimeError(
-            "Flower simulation could not start Ray. Training did not start, so "
-            "no round output was produced. Run this in WSL2/Linux or use a "
-            "Python/Ray version combination that starts Ray successfully on "
-            "this machine."
-        ) from exc
 
 
 def start_simulation(
@@ -298,8 +248,7 @@ def start_simulation(
     print(f"Non-IID alpha: {noniid_alpha}")
     print("Start Flower FL simulation")
 
-    check_simulation_backend(num_clients, client_num_cpus)
-    total_num_cpus = max(1, math.ceil(num_clients * client_num_cpus))
+    total_num_cpus = check_simulation_backend(num_clients, client_num_cpus)
     backend_config = {
         "init_args": {
             "num_cpus": total_num_cpus,
@@ -321,6 +270,8 @@ def start_simulation(
     print("\nTraining finished.")
     if strategy.current_parameters is not None:
         set_parameters(global_model, parameters_to_ndarrays(strategy.current_parameters))
+    loss, accuracy = evaluate_model(global_model, device)
+    print_test_metrics("Final", loss, accuracy)
     save_checkpoint(checkpoint_path, global_model, num_clients, noniid_alpha)
 
 

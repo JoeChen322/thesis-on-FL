@@ -31,6 +31,18 @@ def parse_args():
         help="Client CPU counts. Use one integer for all clients or comma-separated values.",
     )
     parser.add_argument(
+        "--client-gpus",
+        type=float,
+        default=0.0,
+        help="GPU count reserved for each Flower simulation client.",
+    )
+    parser.add_argument(
+        "--local-epochs",
+        type=int,
+        default=1,
+        help="Local training epochs per client round.",
+    )
+    parser.add_argument(
         "--accuracy-priority",
         choices=("low", "normal", "high"),
         default="normal",
@@ -73,6 +85,11 @@ def parse_args():
         type=int,
         default=0,
         help="Debug limit for SL/SFL batches per client. 0 means no limit.",
+    )
+    parser.add_argument(
+        "--eval-every-round",
+        action="store_true",
+        help="Evaluate the full MNIST test set after every SL/SFL round.",
     )
     return parser.parse_args()
 
@@ -119,6 +136,10 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
     client_num_cpus = simulation_client_num_cpus(args)
     if args.noniid_alpha < 0.0 or args.noniid_alpha > 1.0:
         raise ValueError("--noniid-alpha must be in the range [0, 1]")
+    if args.client_gpus < 0.0:
+        raise ValueError("--client-gpus must be non-negative")
+    if args.local_epochs < 1:
+        raise ValueError("--local-epochs must be at least 1")
 
     if method == "fl":
         command = [
@@ -130,6 +151,10 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
             str(num_rounds),
             "--client-num-cpus",
             str(client_num_cpus),
+            "--client-num-gpus",
+            str(args.client_gpus),
+            "--local-epochs",
+            str(args.local_epochs),
         ]
         if checkpoint_path is not None:
             command.extend(["--checkpoint-path", str(checkpoint_path)])
@@ -146,12 +171,18 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
             str(num_rounds),
             "--client-num-cpus",
             str(client_num_cpus),
+            "--client-num-gpus",
+            str(args.client_gpus),
+            "--local-epochs",
+            str(args.local_epochs),
         ]
         if checkpoint_path is not None:
             command.extend(["--checkpoint-path", str(checkpoint_path)])
         command.extend(["--noniid-alpha", str(args.noniid_alpha)])
         if args.max_batches:
             command.extend(["--max-batches", str(args.max_batches)])
+        if args.eval_every_round:
+            command.append("--eval-every-round")
         return command
 
     if method == "sl":
@@ -164,12 +195,18 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
             str(num_rounds),
             "--client-num-cpus",
             str(client_num_cpus),
+            "--client-num-gpus",
+            str(args.client_gpus),
+            "--local-epochs",
+            str(args.local_epochs),
         ]
         if checkpoint_path is not None:
             command.extend(["--checkpoint-path", str(checkpoint_path)])
         command.extend(["--noniid-alpha", str(args.noniid_alpha)])
         if args.max_batches:
             command.extend(["--max-batches", str(args.max_batches)])
+        if args.eval_every_round:
+            command.append("--eval-every-round")
         return command
 
     raise ValueError(f"Unknown method: {method}")

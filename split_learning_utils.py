@@ -1,4 +1,5 @@
 import copy
+import math
 import random
 from collections import OrderedDict
 from pathlib import Path
@@ -148,18 +149,15 @@ def client_size(num_clients, client_id, noniid_alpha=1.0):
     return len(split_indices(dataset, num_clients, noniid_alpha)[client_id])
 
 
-def client_subset(client_id, num_clients, train=True, noniid_alpha=1.0):
-    dataset = load_mnist_dataset(train=train)
-    if train:
-        indices = split_indices(dataset, num_clients, noniid_alpha)[client_id]
-    else:
-        indices = split_indices_iid(len(dataset), num_clients)[client_id]
+def client_subset(client_id, num_clients, noniid_alpha=1.0):
+    dataset = load_mnist_dataset(train=True)
+    indices = split_indices(dataset, num_clients, noniid_alpha)[client_id]
     return Subset(dataset, indices)
 
 
 def get_batch(client_id, num_clients, batch_index, batch_size, device, noniid_alpha=1.0):
     loader = DataLoader(
-        client_subset(client_id, num_clients, train=True, noniid_alpha=noniid_alpha),
+        client_subset(client_id, num_clients, noniid_alpha=noniid_alpha),
         batch_size=batch_size,
         shuffle=False,
     )
@@ -180,7 +178,7 @@ def load_data(
     noniid_alpha=1.0,
 ):
     trainloader = DataLoader(
-        client_subset(client_id, num_clients, train=True, noniid_alpha=noniid_alpha),
+        client_subset(client_id, num_clients, noniid_alpha=noniid_alpha),
         batch_size=train_batch_size,
         shuffle=True,
     )
@@ -263,3 +261,37 @@ def save_split_checkpoint(
         path,
     )
     print(f"Saved checkpoint: {path}")
+
+
+def check_simulation_backend(
+    num_clients,
+    client_num_cpus,
+    simulation_name="Flower simulation",
+):
+    print("Checking Flower simulation backend...", flush=True)
+    total_num_cpus = max(1, math.ceil(num_clients * client_num_cpus))
+    try:
+        import ray
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            f"{simulation_name} requires the Ray backend, but `ray` is not "
+            "installed for this Python environment. On Windows, Ray is not "
+            "available for all Python versions; use a Python version with a Ray "
+            "wheel, or run this in WSL2."
+        ) from exc
+
+    try:
+        ray.init(
+            num_cpus=total_num_cpus,
+            include_dashboard=False,
+        )
+        ray.shutdown()
+    except Exception as exc:
+        raise RuntimeError(
+            f"{simulation_name} could not start Ray. Training did not start, so "
+            "no round output was produced. Run this in WSL2/Linux or use a "
+            "Python/Ray version combination that starts Ray successfully on "
+            "this machine."
+        ) from exc
+
+    return total_num_cpus

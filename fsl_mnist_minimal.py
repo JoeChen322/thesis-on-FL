@@ -2,6 +2,7 @@ import argparse
 from functools import partial
 import torch
 from flower_split_message import run_message_simulation
+from mnist_evaluation import evaluate_split_model, print_test_metrics
 from split_learning_utils import (
     ClientNet,
     ServerNet,
@@ -33,6 +34,11 @@ def parse_args():
     parser.add_argument("--client-num-cpus", type=float, default=1.0)
     parser.add_argument("--client-num-gpus", type=float, default=0.0)
     parser.add_argument("--max-batches", type=int, default=0)
+    parser.add_argument(
+        "--eval-every-round",
+        action="store_true",
+        help="Evaluate the full MNIST test set after every round.",
+    )
     parser.add_argument(
         "--noniid-alpha",
         type=float,
@@ -90,7 +96,10 @@ def main():
         initial_client_states=initial_client_states,
         initial_server_state=initial_server_state,
         on_finished_fn=on_finished_fn,
+        evaluate_fn=evaluate_split_model,
+        print_metrics_fn=print_test_metrics,
         max_batches=args.max_batches or None,
+        eval_every_round=args.eval_every_round,
     )
 
 

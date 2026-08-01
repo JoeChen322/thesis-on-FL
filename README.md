@@ -59,10 +59,27 @@
    This allows the project to preserve the state of each method across rounds
    instead of restarting from scratch every time.
 
+   The shared data partition configuration is stored in the checkpoint. If a
+   checkpoint was created with a different `--num-clients`, `--noniid-alpha`,
+   or seed, recovery stops with an error instead of silently mixing
+   incompatible client data splits.
+
    By default, checkpoints are stored in:
 
    ```text
    .\checkpoints
+   ```
+
+6. Non-IID Data Splitting
+
+   Training data can be split by a shared Dirichlet distribution with
+   `--noniid-alpha` in the range `[0, 1]`. Smaller values create stronger
+   label skew across clients. The default value is `1.0`, which keeps the
+   original IID split.
+
+   Example:
+   ```bash
+   python .\main.py --method fl --num-clients 3 --num-rounds 3 --noniid-alpha 0.2
    ```
 
    
