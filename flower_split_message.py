@@ -14,7 +14,11 @@ from flwr.serverapp import ServerApp
 from flwr.simulation import run_simulation
 from torch import nn
 
-from split_learning_utils import check_simulation_backend
+from split_learning_utils import (
+    build_ray_backend_config,
+    check_simulation_backend,
+)
+
 
 def model_to_record(model):
     return ArrayRecord.from_torch_state_dict(model.state_dict())
@@ -65,7 +69,11 @@ def make_client_app(
             "labels": ArrayRecord.from_numpy_ndarrays([
                 y.detach().cpu().numpy()
             ]),
-            "metrics": MetricRecord({"num_examples": int(y.size(0))}),
+            "metrics": MetricRecord({
+                "client_id": client_id,
+                "batch_index": batch_index,
+                "num_examples": int(y.size(0)),
+            }),
         })
         return Message(content, reply_to=message)
 
@@ -97,7 +105,11 @@ def make_client_app(
         context.state["client_model"] = model_to_record(client_model)
 
         return Message(RecordDict({
-            "metrics": MetricRecord({"updated": 1})
+            "metrics": MetricRecord({
+                "client_id": client_id,
+                "batch_index": batch_index,
+                "updated": 1,
+            })
         }), reply_to=message)
 
     @app.train("get_params")
@@ -160,21 +172,43 @@ def make_server_app(
             )
         node_ids = node_ids[:num_clients]
         sizes = [client_size_fn(num_clients, cid) for cid in range(num_clients)]
+        num_batches_by_client = [
+            math.ceil(size / batch_size)
+            for size in sizes
+        ]
+        if max_batches is not None:
+            num_batches_by_client = [
+                min(num_batches, max_batches)
+                for num_batches in num_batches_by_client
+            ]
 
         def get_client_states(group_id):
-            param_replies = []
-            for node_id in node_ids:
-                msg = grid.create_message(
+            msgs = [
+                grid.create_message(
                     RecordDict({}),
                     message_type="train.get_params",
                     dst_node_id=node_id,
                     group_id=group_id,
                 )
-                param_replies.append(list(grid.send_and_receive([msg]))[0])
+                for node_id in node_ids
+            ]
+            param_replies = list(grid.send_and_receive(msgs))
             return [
                 record_to_state_dict(reply.content["client_model"])
                 for reply in param_replies
             ]
+
+        def set_client_states(record, group_id):
+            msgs = [
+                grid.create_message(
+                    RecordDict({"client_model": record}),
+                    message_type="train.set_params",
+                    dst_node_id=node_id,
+                    group_id=group_id,
+                )
+                for node_id in node_ids
+            ]
+            list(grid.send_and_receive(msgs))
 
         def evaluate_current_models(label):
             if evaluate_fn is None:
@@ -216,8 +250,8 @@ def make_server_app(
                 print_metrics_fn(metric_label, avg_loss, avg_accuracy)
 
         if initial_client_states is not None:
-            for node_id, client_state in zip(node_ids, initial_client_states):
-                msg = grid.create_message(
+            load_msgs = [
+                grid.create_message(
                     RecordDict({
                         "client_model": ArrayRecord.from_torch_state_dict(client_state)
                     }),
@@ -225,7 +259,9 @@ def make_server_app(
                     dst_node_id=node_id,
                     group_id="load-client-params",
                 )
-                list(grid.send_and_receive([msg]))
+                for node_id, client_state in zip(node_ids, initial_client_states)
+            ]
+            list(grid.send_and_receive(load_msgs))
 
         print(f"Device: {device}")
         print(f"Number of clients: {num_clients}")
@@ -238,28 +274,42 @@ def make_server_app(
             total_examples = 0
             print(f"\n========== Round {round_idx} ==========")
 
-            for client_id, node_id in enumerate(node_ids):
-                num_batches = math.ceil(sizes[client_id] / batch_size)
-                if max_batches is not None:
-                    num_batches = min(num_batches, max_batches)
-                for _ in range(local_epochs):
-                    for batch_index in range(num_batches):
+            for _ in range(local_epochs):
+                max_round_batches = max(num_batches_by_client)
+                for batch_index in range(max_round_batches):
+                    forward_msgs = []
+                    active_clients = []
+                    for client_id, node_id in enumerate(node_ids):
+                        if batch_index >= num_batches_by_client[client_id]:
+                            continue
+
                         config = ConfigRecord({
                             "client_id": client_id,
                             "num_clients": num_clients,
                             "batch_index": batch_index,
                             "batch_size": batch_size,
                         })
-                        forward_msg = grid.create_message(
-                            RecordDict({"config": config}),
-                            message_type="train.forward",
-                            dst_node_id=node_id,
-                            group_id=f"{round_idx}-forward",
+                        forward_msgs.append(
+                            grid.create_message(
+                                RecordDict({"config": config}),
+                                message_type="train.forward",
+                                dst_node_id=node_id,
+                                group_id=f"{round_idx}-forward-{batch_index}",
+                            )
                         )
-                        forward_reply = list(
-                            grid.send_and_receive([forward_msg])
-                        )[0]
-                        #Sequentially processes clients, so only use[0]
+                        active_clients.append((client_id, node_id))
+
+                    if not forward_msgs:
+                        continue
+
+                    forward_replies_by_client = {
+                        int(reply.content["metrics"]["client_id"]): reply
+                        for reply in grid.send_and_receive(forward_msgs)
+                    }
+
+                    backward_msgs = []
+                    for client_id, node_id in active_clients:
+                        forward_reply = forward_replies_by_client[client_id]
                         activation = torch.tensor(
                             forward_reply.content["activation"].to_numpy_ndarrays()[0],
                             device=device,
@@ -286,16 +336,17 @@ def make_server_app(
                             "batch_size": batch_size,
                             "lr_client": lr_client,
                         })
-                        backward_msg = grid.create_message(
-                            RecordDict({
-                                "config": backward_config,
-                                "gradient": ArrayRecord.from_numpy_ndarrays([grad]),
-                            }),
-                            message_type="train.backward",
-                            dst_node_id=node_id,
-                            group_id=f"{round_idx}-backward",
+                        backward_msgs.append(
+                            grid.create_message(
+                                RecordDict({
+                                    "config": backward_config,
+                                    "gradient": ArrayRecord.from_numpy_ndarrays([grad]),
+                                }),
+                                message_type="train.backward",
+                                dst_node_id=node_id,
+                                group_id=f"{round_idx}-backward-{batch_index}",
+                            )
                         )
-                        list(grid.send_and_receive([backward_msg]))
 
                         num_examples = labels.size(0)
                         total_loss += loss.item() * num_examples
@@ -304,6 +355,9 @@ def make_server_app(
                         ).sum().item()
                         total_examples += num_examples
 
+                    list(grid.send_and_receive(backward_msgs))
+
+            for client_id, num_batches in enumerate(num_batches_by_client):
                 print(f"Client {client_id} -> server: finished {num_batches} batches")
 
             if use_client_fedavg:
@@ -313,15 +367,7 @@ def make_server_app(
                 #switch the dict form into message form
                 avg_record = ArrayRecord.from_torch_state_dict(avg_state)
 
-                for node_id in node_ids:
-                    msg = grid.create_message(
-                        RecordDict({"client_model": avg_record}),
-                        message_type="train.set_params",
-                        dst_node_id=node_id,
-                        group_id=f"{round_idx}-set-client-params",
-                    )
-                    list(grid.send_and_receive([msg]))
-
+                set_client_states(avg_record, f"{round_idx}-set-client-params")
                 print("SFL client-side FedAvg: completed")
 
             print("--------------------------------")
@@ -392,16 +438,7 @@ def run_message_simulation(
         eval_every_round=eval_every_round,
     )
     client_app = make_client_app(client_model_cls, get_batch_fn)
-    backend_config = {
-        "init_args": {
-            "num_cpus": total_num_cpus,
-            "include_dashboard": False,
-        },
-        "client_resources": {
-            "num_cpus": num_cpus,
-            "num_gpus": num_gpus,
-        }
-    }
+    backend_config = build_ray_backend_config(total_num_cpus, num_cpus, num_gpus)
     print("Starting Flower Message API simulation...", flush=True)
     run_simulation(
         server_app=server_app,

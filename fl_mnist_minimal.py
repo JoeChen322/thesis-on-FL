@@ -17,6 +17,7 @@ from flwr.simulation import run_simulation
 from mnist_evaluation import evaluate_model, print_test_metrics
 from split_learning_utils import (
     FullNet,
+    build_ray_backend_config,
     check_simulation_backend,
     client_size,
     fedavg_state_dicts,
@@ -249,16 +250,11 @@ def start_simulation(
     print("Start Flower FL simulation")
 
     total_num_cpus = check_simulation_backend(num_clients, client_num_cpus)
-    backend_config = {
-        "init_args": {
-            "num_cpus": total_num_cpus,
-            "include_dashboard": False,
-        },
-        "client_resources": {
-            "num_cpus": client_num_cpus,
-            "num_gpus": client_num_gpus,
-        }
-    }
+    backend_config = build_ray_backend_config(
+        total_num_cpus,
+        client_num_cpus,
+        client_num_gpus,
+    )
     run_simulation(
         server_app=make_server_app(num_rounds, num_clients, strategy),
         client_app=make_client_app(num_clients, noniid_alpha),

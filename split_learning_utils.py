@@ -295,3 +295,16 @@ def check_simulation_backend(
         ) from exc
 
     return total_num_cpus
+
+
+def build_ray_backend_config(total_num_cpus, client_num_cpus, client_num_gpus=0.0):
+    return {
+        "init_args": {
+            "num_cpus": total_num_cpus,
+            "include_dashboard": False,
+        },
+        "client_resources": {
+            "num_cpus": client_num_cpus,
+            "num_gpus": client_num_gpus,
+        },
+    }
