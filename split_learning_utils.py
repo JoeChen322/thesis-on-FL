@@ -271,27 +271,13 @@ def check_simulation_backend(
     print("Checking Flower simulation backend...", flush=True)
     total_num_cpus = max(1, math.ceil(num_clients * client_num_cpus))
     try:
-        import ray
+        import ray  # noqa: F401
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             f"{simulation_name} requires the Ray backend, but `ray` is not "
             "installed for this Python environment. On Windows, Ray is not "
             "available for all Python versions; use a Python version with a Ray "
             "wheel, or run this in WSL2."
-        ) from exc
-
-    try:
-        ray.init(
-            num_cpus=total_num_cpus,
-            include_dashboard=False,
-        )
-        ray.shutdown()
-    except Exception as exc:
-        raise RuntimeError(
-            f"{simulation_name} could not start Ray. Training did not start, so "
-            "no round output was produced. Run this in WSL2/Linux or use a "
-            "Python/Ray version combination that starts Ray successfully on "
-            "this machine."
         ) from exc
 
     return total_num_cpus
