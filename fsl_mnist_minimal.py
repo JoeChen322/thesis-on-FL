@@ -3,9 +3,14 @@ from functools import partial
 import torch
 from flower_split_message import run_message_simulation
 from mnist_evaluation import evaluate_split_model, print_test_metrics
+from noniid_jsd_switch import (
+    DEFAULT_IID_JSD_THRESHOLD,
+    DEFAULT_STRONG_NONIID_JSD_THRESHOLD,
+)
 from split_learning_utils import (
     ClientNet,
     ServerNet,
+    client_label_boundary_score,
     client_size as message_client_size,
     fedavg_state_dicts as fedavg,
     get_batch as message_get_batch,
@@ -45,6 +50,23 @@ def parse_args():
         default=1.0,
         help="Shared Dirichlet non-IID degree in [0, 1]. 1.0 keeps IID splitting.",
     )
+    parser.add_argument(
+        "--boundary-noniid-switch",
+        action="store_true",
+        help="Let clients report one local JSD scalar for server-side pattern toggling.",
+    )
+    parser.add_argument(
+        "--iid-jsd-threshold",
+        type=float,
+        default=DEFAULT_IID_JSD_THRESHOLD,
+        help="Mean client boundary log2-JSD at or below this value is treated as IID.",
+    )
+    parser.add_argument(
+        "--strong-noniid-jsd-threshold",
+        type=float,
+        default=DEFAULT_STRONG_NONIID_JSD_THRESHOLD,
+        help="Mean client boundary log2-JSD at or above this value is treated as strong non-IID.",
+    )
     return parser.parse_args()
 
 # -----------------Main training process-------------
@@ -76,6 +98,10 @@ def main():
         message_get_batch,
         noniid_alpha=args.noniid_alpha,
     )
+    boundary_condition_with_alpha = partial(
+        client_label_boundary_score,
+        noniid_alpha=args.noniid_alpha,
+    )
 
     run_message_simulation(
         client_model_cls=ClientNet,
@@ -100,6 +126,10 @@ def main():
         print_metrics_fn=print_test_metrics,
         max_batches=args.max_batches or None,
         eval_every_round=args.eval_every_round,
+        boundary_condition_fn=boundary_condition_with_alpha,
+        boundary_switch_enabled=args.boundary_noniid_switch,
+        iid_jsd_threshold=args.iid_jsd_threshold,
+        strong_noniid_jsd_threshold=args.strong_noniid_jsd_threshold,
     )
 
 

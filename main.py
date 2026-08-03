@@ -5,6 +5,11 @@ import subprocess
 import sys
 import time
 
+from noniid_jsd_switch import (
+    DEFAULT_IID_JSD_THRESHOLD,
+    DEFAULT_STRONG_NONIID_JSD_THRESHOLD,
+)
+
 
 def choose_method(args):
     if args.method != "auto":
@@ -72,13 +77,30 @@ def parse_args():
     parser.add_argument(
         "--checkpoint-path",
         default="",
-        help="Shared checkpoint path used by FL/SL/SFL. Defaults to checkpoint-dir/shared_<num-clients>clients_checkpoint.pt.",
+        help="Shared checkpoint path used by FL/SL/SFL. Defaults to checkpoint-dir/shared_<num-clients>clients_alpha<noniid-alpha>_checkpoint.pt.",
     )
     parser.add_argument(
         "--noniid-alpha",
         type=float,
         default=1.0,
         help="Shared Dirichlet non-IID degree in [0, 1]. 1.0 keeps IID splitting.",
+    )
+    parser.add_argument(
+        "--adaptive-noniid-switch",
+        action="store_true",
+        help="Let clients report one local JSD scalar for server-side pattern toggling.",
+    )
+    parser.add_argument(
+        "--iid-jsd-threshold",
+        type=float,
+        default=DEFAULT_IID_JSD_THRESHOLD,
+        help="Mean client boundary log2-JSD at or below this value is treated as IID.",
+    )
+    parser.add_argument(
+        "--strong-noniid-jsd-threshold",
+        type=float,
+        default=DEFAULT_STRONG_NONIID_JSD_THRESHOLD,
+        help="Mean client boundary log2-JSD at or above this value is treated as strong non-IID.",
     )
     parser.add_argument(
         "--max-batches",
@@ -104,7 +126,12 @@ def shared_checkpoint_path(project_root, args):
         if checkpoint_path.is_absolute():
             return checkpoint_path
         return project_root / checkpoint_path
-    return project_root / args.checkpoint_dir / f"shared_{args.num_clients}clients_checkpoint.pt"
+    alpha_label = str(args.noniid_alpha).replace(".", "p")
+    return (
+        project_root
+        / args.checkpoint_dir
+        / f"shared_{args.num_clients}clients_alpha{alpha_label}_checkpoint.pt"
+    )
 
 
 def parse_client_cpus(value, num_clients):
@@ -183,6 +210,13 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
             command.extend(["--max-batches", str(args.max_batches)])
         if args.eval_every_round:
             command.append("--eval-every-round")
+        if args.adaptive_noniid_switch:
+            command.append("--boundary-noniid-switch")
+            command.extend(["--iid-jsd-threshold", str(args.iid_jsd_threshold)])
+            command.extend([
+                "--strong-noniid-jsd-threshold",
+                str(args.strong_noniid_jsd_threshold),
+            ])
         return command
 
     if method == "sl":
@@ -207,6 +241,13 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
             command.extend(["--max-batches", str(args.max_batches)])
         if args.eval_every_round:
             command.append("--eval-every-round")
+        if args.adaptive_noniid_switch:
+            command.append("--boundary-noniid-switch")
+            command.extend(["--iid-jsd-threshold", str(args.iid_jsd_threshold)])
+            command.extend([
+                "--strong-noniid-jsd-threshold",
+                str(args.strong_noniid_jsd_threshold),
+            ])
         return command
 
     raise ValueError(f"Unknown method: {method}")
@@ -275,6 +316,11 @@ def run_once(args, project_root, python_executable, method, selection_reason):
 
     print(f"Selected method: {method.upper()} for {args.num_clients} clients", flush=True)
     print(f"Selection reason: {selection_reason}", flush=True)
+    if args.adaptive_noniid_switch:
+        print(
+            "Boundary non-IID switch: enabled; clients report one local JSD scalar",
+            flush=True,
+        )
     print(f"Shared non-IID alpha: {args.noniid_alpha}", flush=True)
     print(f"Using Python: {python_executable}", flush=True)
     run_command(
@@ -290,6 +336,11 @@ def run_with_adaptive_switch(args, project_root, python_executable, method, sele
 
     print(f"Initial method: {method.upper()} for {args.num_clients} clients", flush=True)
     print(f"Initial selection reason: {selection_reason}", flush=True)
+    if args.adaptive_noniid_switch:
+        print(
+            "Boundary non-IID switch: enabled; clients report one local JSD scalar",
+            flush=True,
+        )
     print(f"Shared non-IID alpha: {args.noniid_alpha}", flush=True)
     print(f"Using Python: {python_executable}", flush=True)
     print(

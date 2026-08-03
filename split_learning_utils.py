@@ -1,5 +1,6 @@
 import copy
 import math
+import os
 import random
 from collections import OrderedDict
 from pathlib import Path
@@ -8,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, default_collate
 from torchvision import datasets, transforms
 
 
@@ -16,6 +17,7 @@ SEED = 1234
 _DATASET_CACHE = {}
 _SPLIT_CACHE = {}
 MIN_DIRICHLET_ALPHA = 1e-3
+SIMULATION_TOTAL_CPUS_ENV = "SIMULATION_TOTAL_CPUS"
 
 
 class ClientNet(nn.Module):
@@ -156,18 +158,35 @@ def client_subset(client_id, num_clients, noniid_alpha=1.0):
 
 
 def get_batch(client_id, num_clients, batch_index, batch_size, device, noniid_alpha=1.0):
-    loader = DataLoader(
-        client_subset(client_id, num_clients, noniid_alpha=noniid_alpha),
-        batch_size=batch_size,
-        shuffle=False,
-    )
+    dataset = load_mnist_dataset(train=True)
+    indices = split_indices(dataset, num_clients, noniid_alpha)[client_id]
+    start = batch_index * batch_size
+    end = min(start + batch_size, len(indices))
+    if start >= len(indices):
+        raise IndexError(f"batch_index {batch_index} is outside client {client_id} data")
 
-    for current_index, batch in enumerate(loader):
-        if current_index == batch_index:
-            x, y = batch
-            return x.to(device), y.to(device)
+    x, y = default_collate([dataset[int(index)] for index in indices[start:end]])
+    return x.to(device), y.to(device)
 
-    raise IndexError(f"batch_index {batch_index} is outside client {client_id} data")
+
+def client_label_boundary_score(client_id, num_clients, noniid_alpha=1.0, num_classes=10):
+    dataset = load_mnist_dataset(train=True)
+    indices = split_indices(dataset, num_clients, noniid_alpha)[client_id]
+    if len(indices) == 0:
+        return 1.0
+
+    targets = np.asarray(dataset.targets)
+    labels = targets[np.asarray(indices, dtype=np.int64)]
+    counts = np.bincount(labels, minlength=num_classes).astype(np.float64)
+    distribution = counts / counts.sum()
+    reference = np.full(num_classes, 1.0 / num_classes, dtype=np.float64)
+    mixture = 0.5 * (distribution + reference)
+    return 0.5 * _kl_divergence_log2(distribution, mixture) + 0.5 * _kl_divergence_log2(reference, mixture)
+
+
+def _kl_divergence_log2(left, right):
+    mask = left > 0
+    return float(np.sum(left[mask] * np.log2(left[mask] / right[mask])))
 
 
 def load_data(
@@ -269,7 +288,8 @@ def check_simulation_backend(
     simulation_name="Flower simulation",
 ):
     print("Checking Flower simulation backend...", flush=True)
-    total_num_cpus = max(1, math.ceil(num_clients * client_num_cpus))
+    requested_cpus = max(1, math.ceil(num_clients * client_num_cpus))
+    total_num_cpus = simulation_total_num_cpus()
     try:
         import ray  # noqa: F401
     except ModuleNotFoundError as exc:
@@ -280,7 +300,27 @@ def check_simulation_backend(
             "wheel, or run this in WSL2."
         ) from exc
 
+    print(f"Ray total CPU slots: {total_num_cpus}", flush=True)
+    print(f"Requested client CPU slots: {requested_cpus}", flush=True)
+    if requested_cpus > total_num_cpus:
+        print(
+            f"Requested client CPU slots exceed Ray total CPU slots; "
+            f"clients will run in waves.",
+            flush=True,
+        )
+
     return total_num_cpus
+
+
+def simulation_total_num_cpus():
+    configured_total_cpus = os.environ.get(SIMULATION_TOTAL_CPUS_ENV)
+    if configured_total_cpus:
+        total_num_cpus = int(configured_total_cpus)
+        if total_num_cpus < 1:
+            raise ValueError(f"{SIMULATION_TOTAL_CPUS_ENV} must be at least 1")
+        return total_num_cpus
+
+    return max(1, torch.get_num_threads())
 
 
 def build_ray_backend_config(total_num_cpus, client_num_cpus, client_num_gpus=0.0):

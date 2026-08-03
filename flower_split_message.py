@@ -1,4 +1,6 @@
 import math
+import os
+import time
 from typing import Callable, Type
 
 import torch
@@ -18,6 +20,97 @@ from split_learning_utils import (
     build_ray_backend_config,
     check_simulation_backend,
 )
+from noniid_jsd_switch import (
+    DEFAULT_IID_JSD_THRESHOLD,
+    DEFAULT_STRONG_NONIID_JSD_THRESHOLD,
+    classify_noniid_condition,
+    validate_jsd_thresholds,
+)
+
+
+THREAD_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+)
+
+
+def client_num_threads(num_cpus):
+    return max(1, math.ceil(float(num_cpus)))
+
+
+def configure_thread_env(num_threads):
+    for env_var in THREAD_ENV_VARS:
+        os.environ[env_var] = str(num_threads)
+
+
+def configure_torch_threads(num_threads):
+    configure_thread_env(num_threads)
+    torch.set_num_threads(num_threads)
+    return torch.get_num_threads()
+
+
+def log_client_trace(
+    phase,
+    event,
+    client_id,
+    batch_index,
+    num_threads,
+    start_perf=None,
+):
+    now_perf = time.perf_counter()
+    fields = [
+        "CLIENT_TRACE",
+        f"phase={phase}",
+        f"event={event}",
+        f"wall_ts={time.time():.6f}",
+        f"perf_ts={now_perf:.6f}",
+        f"pid={os.getpid()}",
+        f"client_id={client_id}",
+        f"batch_index={batch_index}",
+        f"torch_threads={torch.get_num_threads()}",
+        f"configured_threads={num_threads}",
+    ]
+    if start_perf is not None:
+        fields.append(f"duration_s={now_perf - start_perf:.6f}")
+    print(" ".join(fields), flush=True)
+    return now_perf
+
+
+class PatternTogglingManager:
+    def __init__(
+        self,
+        initial_use_client_fedavg,
+        iid_threshold=DEFAULT_IID_JSD_THRESHOLD,
+        strong_threshold=DEFAULT_STRONG_NONIID_JSD_THRESHOLD,
+    ):
+        validate_jsd_thresholds(iid_threshold, strong_threshold)
+        self.use_client_fedavg = bool(initial_use_client_fedavg)
+        self.iid_threshold = float(iid_threshold)
+        self.strong_threshold = float(strong_threshold)
+        self.condition = "unknown"
+        self.mean_boundary_score = 0.0
+        self.max_boundary_score = 0.0
+
+    def consume_boundary_scores(self, scores_by_client):
+        scores = [float(score) for _, score in sorted(scores_by_client.items())]
+        if not scores:
+            return self.use_client_fedavg
+
+        self.mean_boundary_score = sum(scores) / len(scores)
+        self.max_boundary_score = max(scores)
+        self.condition = classify_noniid_condition(
+            self.mean_boundary_score,
+            iid_threshold=self.iid_threshold,
+            strong_threshold=self.strong_threshold,
+        )
+        if self.condition == "strong_noniid":
+            self.use_client_fedavg = True
+        return self.use_client_fedavg
+
+    def pattern_name(self):
+        return "SFL" if self.use_client_fedavg else "SL"
 
 
 def model_to_record(model):
@@ -41,17 +134,27 @@ def load_model_from_state(context, state_key, model_cls, device):
 def make_client_app(
     client_model_cls: Type[nn.Module],
     get_batch_fn: Callable,
+    num_threads: int,
+    boundary_condition_fn: Callable | None = None,
 ):
     app = ClientApp()
 
     @app.train("forward")
     def forward(message, context):
+        configure_torch_threads(num_threads)
         config = message.content["config"]#get the content
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         client_id = int(config["client_id"])
         num_clients = int(config["num_clients"])
         batch_index = int(config["batch_index"])
         batch_size = int(config["batch_size"])
+        start_perf = log_client_trace(
+            "forward",
+            "START",
+            client_id,
+            batch_index,
+            num_threads,
+        )
 
         client_model = load_model_from_state(
             context, "client_model", client_model_cls, device
@@ -75,10 +178,19 @@ def make_client_app(
                 "num_examples": int(y.size(0)),
             }),
         })
+        log_client_trace(
+            "forward",
+            "END",
+            client_id,
+            batch_index,
+            num_threads,
+            start_perf=start_perf,
+        )
         return Message(content, reply_to=message)
 
     @app.train("backward")
     def backward(message, context):
+        configure_torch_threads(num_threads)
         config = message.content["config"]
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         client_id = int(config["client_id"])
@@ -86,6 +198,13 @@ def make_client_app(
         batch_index = int(config["batch_index"])
         batch_size = int(config["batch_size"])
         lr_client = float(config["lr_client"])
+        start_perf = log_client_trace(
+            "backward",
+            "START",
+            client_id,
+            batch_index,
+            num_threads,
+        )
 
         client_model = load_model_from_state(
             context, "client_model", client_model_cls, device
@@ -104,6 +223,14 @@ def make_client_app(
         optimizer.step()
         context.state["client_model"] = model_to_record(client_model)
 
+        log_client_trace(
+            "backward",
+            "END",
+            client_id,
+            batch_index,
+            num_threads,
+            start_perf=start_perf,
+        )
         return Message(RecordDict({
             "metrics": MetricRecord({
                 "client_id": client_id,
@@ -114,6 +241,7 @@ def make_client_app(
 
     @app.train("get_params")
     def get_params(message, context):
+        configure_torch_threads(num_threads)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         client_model = load_model_from_state(
             context, "client_model", client_model_cls, device
@@ -124,9 +252,27 @@ def make_client_app(
 
     @app.train("set_params")
     def set_params(message, context):
+        configure_torch_threads(num_threads)
         context.state["client_model"] = message.content["client_model"]
         return Message(RecordDict({
             "metrics": MetricRecord({"updated": 1})
+        }), reply_to=message)
+
+    @app.train("boundary_condition")
+    def boundary_condition(message, context):
+        configure_torch_threads(num_threads)
+        if boundary_condition_fn is None:
+            raise RuntimeError("boundary_condition_fn is not configured")
+
+        config = message.content["config"]
+        client_id = int(config["client_id"])
+        num_clients = int(config["num_clients"])
+        boundary_score = float(boundary_condition_fn(client_id, num_clients))
+        return Message(RecordDict({
+            "metrics": MetricRecord({
+                "client_id": client_id,
+                "boundary_score": boundary_score,
+            })
         }), reply_to=message)
 
     return app
@@ -152,6 +298,9 @@ def make_server_app(
     use_client_fedavg: bool,
     max_batches: int | None,
     eval_every_round: bool,
+    boundary_switch_enabled: bool,
+    iid_jsd_threshold: float,
+    strong_noniid_jsd_threshold: float,
 ):
     app = ServerApp()
 
@@ -171,6 +320,11 @@ def make_server_app(
                 f"Expected {num_clients} clients, but only {len(node_ids)} are available"
             )
         node_ids = node_ids[:num_clients]
+        pattern_manager = PatternTogglingManager(
+            initial_use_client_fedavg=use_client_fedavg,
+            iid_threshold=iid_jsd_threshold,
+            strong_threshold=strong_noniid_jsd_threshold,
+        )
         sizes = [client_size_fn(num_clients, cid) for cid in range(num_clients)]
         num_batches_by_client = [
             math.ceil(size / batch_size)
@@ -210,6 +364,29 @@ def make_server_app(
             ]
             list(grid.send_and_receive(msgs))
 
+        def collect_boundary_conditions(group_id):
+            msgs = [
+                grid.create_message(
+                    RecordDict({
+                        "config": ConfigRecord({
+                            "client_id": client_id,
+                            "num_clients": num_clients,
+                        })
+                    }),
+                    message_type="train.boundary_condition",
+                    dst_node_id=node_id,
+                    group_id=group_id,
+                )
+                for client_id, node_id in enumerate(node_ids)
+            ]
+            replies = list(grid.send_and_receive(msgs))
+            return {
+                int(reply.content["metrics"]["client_id"]): float(
+                    reply.content["metrics"]["boundary_score"]
+                )
+                for reply in replies
+            }
+
         def evaluate_current_models(label):
             if evaluate_fn is None:
                 return
@@ -218,7 +395,7 @@ def make_server_app(
             client_states = get_client_states(f"{group_label}-eval-client-params")
             states_to_evaluate = (
                 client_states[:1]
-                if use_client_fedavg
+                if pattern_manager.use_client_fedavg
                 else client_states
             )
             losses = []
@@ -267,6 +444,26 @@ def make_server_app(
         print(f"Number of clients: {num_clients}")
         print(f"Client data sizes: {sizes}")
         print("Start Flower Message API Split Learning simulation")
+        if boundary_switch_enabled:
+            scores_by_client = collect_boundary_conditions("boundary-condition")
+            pattern_manager.consume_boundary_scores(scores_by_client)
+            score_text = ", ".join(
+                f"{client_id}:{score:.4f}"
+                for client_id, score in sorted(scores_by_client.items())
+            )
+            print(
+                "Pattern Toggling Manager boundary scores: "
+                f"{score_text}",
+                flush=True,
+            )
+            print(
+                "Pattern Toggling Manager decision: "
+                f"condition={pattern_manager.condition} "
+                f"mean={pattern_manager.mean_boundary_score:.4f} "
+                f"max={pattern_manager.max_boundary_score:.4f} "
+                f"pattern={pattern_manager.pattern_name()}",
+                flush=True,
+            )
 
         for round_idx in range(1, num_rounds + 1):
             total_loss = 0.0
@@ -360,7 +557,7 @@ def make_server_app(
             for client_id, num_batches in enumerate(num_batches_by_client):
                 print(f"Client {client_id} -> server: finished {num_batches} batches")
 
-            if use_client_fedavg:
+            if pattern_manager.use_client_fedavg:
                 client_states = get_client_states(f"{round_idx}-get-client-params")
                 #get the average value
                 avg_state = fedavg_fn(client_states, sizes)
@@ -409,7 +606,13 @@ def run_message_simulation(
     print_metrics_fn: Callable | None = None,
     max_batches: int | None = None,
     eval_every_round: bool = False,
+    boundary_condition_fn: Callable | None = None,
+    boundary_switch_enabled: bool = False,
+    iid_jsd_threshold: float = DEFAULT_IID_JSD_THRESHOLD,
+    strong_noniid_jsd_threshold: float = DEFAULT_STRONG_NONIID_JSD_THRESHOLD,
 ):
+    num_threads = client_num_threads(num_cpus)
+    configure_thread_env(num_threads)
     total_num_cpus = check_simulation_backend(
         num_clients,
         num_cpus,
@@ -436,9 +639,18 @@ def run_message_simulation(
         use_client_fedavg=use_client_fedavg,
         max_batches=max_batches,
         eval_every_round=eval_every_round,
+        boundary_switch_enabled=boundary_switch_enabled,
+        iid_jsd_threshold=iid_jsd_threshold,
+        strong_noniid_jsd_threshold=strong_noniid_jsd_threshold,
     )
-    client_app = make_client_app(client_model_cls, get_batch_fn)
+    client_app = make_client_app(
+        client_model_cls,
+        get_batch_fn,
+        num_threads,
+        boundary_condition_fn=boundary_condition_fn,
+    )
     backend_config = build_ray_backend_config(total_num_cpus, num_cpus, num_gpus)
+    print(f"Client PyTorch threads per actor: {num_threads}", flush=True)
     print("Starting Flower Message API simulation...", flush=True)
     run_simulation(
         server_app=server_app,

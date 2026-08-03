@@ -82,6 +82,37 @@
    python .\main.py --method fl --num-clients 3 --num-rounds 3 --noniid-alpha 0.2
    ```
 
+7. Boundary-Scalar Non-IID Detection and Pattern Toggling
+
+   The training path does not send raw per-class counts or full label
+   distribution vectors to the server. Each Flower client computes one local
+   boundary scalar:
+
+   ```text
+   JSD(local_label_distribution || uniform_reference)
+   ```
+
+   The scalar uses log base 2, so the value is in `[0, 1]`. The server-side
+   Pattern Toggling Manager consumes only these scalar scores. If the mean score
+   is at or above `--strong-noniid-jsd-threshold`, SL toggles to the SFL pattern
+   by enabling client-side FedAvg.
+
+   Inspect the current split:
+
+   ```bash
+   python .\noniid_jsd_switch.py --num-clients 3 --noniid-alpha 0.2
+   ```
+
+   Enable method switching before training:
+
+   ```bash
+   python .\main.py --method auto --num-clients 3 --num-rounds 3 --noniid-alpha 0.2 --adaptive-noniid-switch
+   ```
+
+   The offline `noniid_jsd_switch.py` report still prints full counts and a JSD
+   matrix for debugging, but that path is not used by the privacy-preserving
+   Flower message switch.
+
    
 
 ## Quick Start
