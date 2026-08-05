@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from split_learning_utils import load_mnist_dataset, split_indices, validate_noniid_alpha
+from split_learning_utils import load_dataset, split_indices, validate_noniid_alpha
 
 
 # JSD is computed with log2, so pairwise values are in [0, 1].
@@ -111,11 +111,12 @@ def detect_noniid_condition(
     dataset=None,
     iid_threshold=DEFAULT_IID_JSD_THRESHOLD,
     strong_threshold=DEFAULT_STRONG_NONIID_JSD_THRESHOLD,
+    dataset_name="mnist",
 ):
     validate_noniid_alpha(noniid_alpha)
     validate_jsd_thresholds(iid_threshold, strong_threshold)
     if dataset is None:
-        dataset = load_mnist_dataset(train=True)
+        dataset = load_dataset(dataset_name, train=True)
 
     counts = client_label_counts(dataset, num_clients, noniid_alpha)
     empty_client_ids = tuple(
@@ -211,6 +212,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--num-clients", type=int, required=True)
     parser.add_argument("--noniid-alpha", type=float, default=1.0)
+    parser.add_argument("--dataset", choices=("mnist", "cifar10"), default="mnist")
     parser.add_argument(
         "--iid-jsd-threshold",
         type=float,
@@ -231,6 +233,7 @@ def main():
     condition = detect_noniid_condition(
         num_clients=args.num_clients,
         noniid_alpha=args.noniid_alpha,
+        dataset_name=args.dataset,
         iid_threshold=args.iid_jsd_threshold,
         strong_threshold=args.strong_noniid_jsd_threshold,
     )

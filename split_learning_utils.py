@@ -30,6 +30,20 @@ class ClientNet(nn.Module):
         return F.relu(self.fc1(x))
 
 
+class CifarClientNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.conv1 = nn.Conv2d(3, 32, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.fc1 = nn.Linear(64 * 8 * 8, 128)
+
+    def forward(self, x):
+        x = F.max_pool2d(F.relu(self.conv1(x)), 2)
+        x = F.max_pool2d(F.relu(self.conv2(x)), 2)
+        x = x.view(x.size(0), -1)
+        return F.relu(self.fc1(x))
+
+
 class ServerNet(nn.Module):
     def __init__(self):
         super().__init__()
@@ -40,10 +54,10 @@ class ServerNet(nn.Module):
 
 
 class FullNet(nn.Module):
-    def __init__(self):
+    def __init__(self, client_model_cls=ClientNet, server_model_cls=ServerNet):
         super().__init__()
-        self.client_model = ClientNet()
-        self.server_model = ServerNet()
+        self.client_model = client_model_cls()
+        self.server_model = server_model_cls()
 
     def forward(self, x):
         return self.server_model(self.client_model(x))
@@ -56,20 +70,52 @@ def set_seed(seed=SEED):
 
 
 def load_mnist_dataset(train):
-    if train in _DATASET_CACHE:
-        return _DATASET_CACHE[train]
+    return load_dataset("mnist", train)
 
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,))
-    ])
-    dataset = datasets.MNIST(
-        root="./data",
-        train=train,
-        download=True,
-        transform=transform,
-    )
-    _DATASET_CACHE[train] = dataset
+
+def normalize_dataset_name(dataset_name):
+    normalized = dataset_name.lower().replace("-", "")
+    if normalized in ("mnist", "cifar10"):
+        return normalized
+    raise ValueError("--dataset must be one of: mnist, cifar10")
+
+
+def get_model_classes(dataset_name):
+    dataset_name = normalize_dataset_name(dataset_name)
+    if dataset_name == "cifar10":
+        return CifarClientNet, ServerNet
+    return ClientNet, ServerNet
+
+
+def load_dataset(dataset_name, train):
+    dataset_name = normalize_dataset_name(dataset_name)
+    cache_key = (dataset_name, bool(train))
+    if cache_key in _DATASET_CACHE:
+        return _DATASET_CACHE[cache_key]
+
+    if dataset_name == "cifar10":
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)),
+        ])
+        dataset = datasets.CIFAR10(
+            root="./data",
+            train=train,
+            download=True,
+            transform=transform,
+        )
+    else:
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.1307,), (0.3081,))
+        ])
+        dataset = datasets.MNIST(
+            root="./data",
+            train=train,
+            download=True,
+            transform=transform,
+        )
+    _DATASET_CACHE[cache_key] = dataset
     return dataset
 
 
@@ -80,8 +126,9 @@ def validate_noniid_alpha(noniid_alpha):
     return alpha
 
 
-def partition_config(num_clients, noniid_alpha):
+def partition_config(num_clients, noniid_alpha, dataset_name="mnist"):
     return {
+        "dataset": normalize_dataset_name(dataset_name),
         "num_clients": int(num_clients),
         "noniid_alpha": validate_noniid_alpha(noniid_alpha),
         "seed": SEED,
@@ -146,19 +193,27 @@ def split_indices(dataset, num_clients, noniid_alpha=1.0):
     return _SPLIT_CACHE[cache_key]
 
 
-def client_size(num_clients, client_id, noniid_alpha=1.0):
-    dataset = load_mnist_dataset(train=True)
+def client_size(num_clients, client_id, noniid_alpha=1.0, dataset_name="mnist"):
+    dataset = load_dataset(dataset_name, train=True)
     return len(split_indices(dataset, num_clients, noniid_alpha)[client_id])
 
 
-def client_subset(client_id, num_clients, noniid_alpha=1.0):
-    dataset = load_mnist_dataset(train=True)
+def client_subset(client_id, num_clients, noniid_alpha=1.0, dataset_name="mnist"):
+    dataset = load_dataset(dataset_name, train=True)
     indices = split_indices(dataset, num_clients, noniid_alpha)[client_id]
     return Subset(dataset, indices)
 
 
-def get_batch(client_id, num_clients, batch_index, batch_size, device, noniid_alpha=1.0):
-    dataset = load_mnist_dataset(train=True)
+def get_batch(
+    client_id,
+    num_clients,
+    batch_index,
+    batch_size,
+    device,
+    noniid_alpha=1.0,
+    dataset_name="mnist",
+):
+    dataset = load_dataset(dataset_name, train=True)
     indices = split_indices(dataset, num_clients, noniid_alpha)[client_id]
     start = batch_index * batch_size
     end = min(start + batch_size, len(indices))
@@ -169,8 +224,14 @@ def get_batch(client_id, num_clients, batch_index, batch_size, device, noniid_al
     return x.to(device), y.to(device)
 
 
-def client_label_boundary_score(client_id, num_clients, noniid_alpha=1.0, num_classes=10):
-    dataset = load_mnist_dataset(train=True)
+def client_label_boundary_score(
+    client_id,
+    num_clients,
+    noniid_alpha=1.0,
+    num_classes=10,
+    dataset_name="mnist",
+):
+    dataset = load_dataset(dataset_name, train=True)
     indices = split_indices(dataset, num_clients, noniid_alpha)[client_id]
     if len(indices) == 0:
         return 1.0
@@ -195,14 +256,20 @@ def load_data(
     train_batch_size=32,
     test_batch_size=128,
     noniid_alpha=1.0,
+    dataset_name="mnist",
 ):
     trainloader = DataLoader(
-        client_subset(client_id, num_clients, noniid_alpha=noniid_alpha),
+        client_subset(
+            client_id,
+            num_clients,
+            noniid_alpha=noniid_alpha,
+            dataset_name=dataset_name,
+        ),
         batch_size=train_batch_size,
         shuffle=True,
     )
     testloader = DataLoader(
-        load_mnist_dataset(train=False),
+        load_dataset(dataset_name, train=False),
         batch_size=test_batch_size,
         shuffle=False,
     )
@@ -222,7 +289,13 @@ def fedavg_state_dicts(state_dicts, sizes):
     return avg_state
 
 
-def load_split_checkpoint(checkpoint_path, num_clients, device, noniid_alpha=1.0):
+def load_split_checkpoint(
+    checkpoint_path,
+    num_clients,
+    device,
+    noniid_alpha=1.0,
+    dataset_name="mnist",
+):
     if not checkpoint_path:
         return None, None
 
@@ -238,13 +311,29 @@ def load_split_checkpoint(checkpoint_path, num_clients, device, noniid_alpha=1.0
             f"but current run has {num_clients} clients"
         )
 
-    expected_partition = partition_config(num_clients, noniid_alpha)
+    expected_partition = partition_config(num_clients, noniid_alpha, dataset_name)
     saved_partition = checkpoint.get("partition")
     if saved_partition is None:
         print(
             "Loaded legacy checkpoint without partition metadata; "
             "cannot verify non-IID alpha consistency."
         )
+    elif "dataset" not in saved_partition:
+        if normalize_dataset_name(dataset_name) != "mnist":
+            raise ValueError(
+                "Checkpoint has no dataset metadata and can only be reused with MNIST"
+            )
+        legacy_expected = {
+            "num_clients": expected_partition["num_clients"],
+            "noniid_alpha": expected_partition["noniid_alpha"],
+            "seed": expected_partition["seed"],
+        }
+        if saved_partition != legacy_expected:
+            raise ValueError(
+                "Checkpoint partition config does not match current run: "
+                f"checkpoint={saved_partition}, current={legacy_expected}"
+            )
+        print("Loaded legacy MNIST checkpoint without dataset metadata.")
     elif saved_partition != expected_partition:
         raise ValueError(
             "Checkpoint partition config does not match current run: "
@@ -261,6 +350,7 @@ def save_split_checkpoint(
     server_model,
     num_clients=None,
     noniid_alpha=1.0,
+    dataset_name="mnist",
 ):
     if not checkpoint_path:
         return
@@ -272,7 +362,7 @@ def save_split_checkpoint(
             "client_models": [copy.deepcopy(state) for state in client_states],
             "server_model": copy.deepcopy(server_model.state_dict()),
             "partition": (
-                partition_config(num_clients, noniid_alpha)
+                partition_config(num_clients, noniid_alpha, dataset_name)
                 if num_clients is not None
                 else None
             ),

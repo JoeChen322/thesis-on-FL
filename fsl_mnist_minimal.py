@@ -8,11 +8,10 @@ from noniid_jsd_switch import (
     DEFAULT_STRONG_NONIID_JSD_THRESHOLD,
 )
 from split_learning_utils import (
-    ClientNet,
-    ServerNet,
     client_label_boundary_score,
     client_size as message_client_size,
     fedavg_state_dicts as fedavg,
+    get_model_classes,
     get_batch as message_get_batch,
     load_split_checkpoint,
     save_split_checkpoint,
@@ -39,10 +38,11 @@ def parse_args():
     parser.add_argument("--client-num-cpus", type=float, default=1.0)
     parser.add_argument("--client-num-gpus", type=float, default=0.0)
     parser.add_argument("--max-batches", type=int, default=0)
+    parser.add_argument("--dataset", choices=("mnist", "cifar10"), default="mnist")
     parser.add_argument(
         "--eval-every-round",
         action="store_true",
-        help="Evaluate the full MNIST test set after every round.",
+        help="Evaluate the full test set after every round.",
     )
     parser.add_argument(
         "--noniid-alpha",
@@ -80,6 +80,7 @@ def main():
         args.num_clients,
         device,
         args.noniid_alpha,
+        args.dataset,
     )
     on_finished_fn = None
     if args.checkpoint_path:
@@ -88,24 +89,33 @@ def main():
             args.checkpoint_path,
             num_clients=args.num_clients,
             noniid_alpha=args.noniid_alpha,
+            dataset_name=args.dataset,
         )
 
     message_client_size_with_alpha = partial(
         message_client_size,
         noniid_alpha=args.noniid_alpha,
+        dataset_name=args.dataset,
     )
     message_get_batch_with_alpha = partial(
         message_get_batch,
         noniid_alpha=args.noniid_alpha,
+        dataset_name=args.dataset,
     )
     boundary_condition_with_alpha = partial(
         client_label_boundary_score,
         noniid_alpha=args.noniid_alpha,
+        dataset_name=args.dataset,
     )
+    evaluate_split_model_for_dataset = partial(
+        evaluate_split_model,
+        dataset_name=args.dataset,
+    )
+    client_model_cls, server_model_cls = get_model_classes(args.dataset)
 
     run_message_simulation(
-        client_model_cls=ClientNet,
-        server_model_cls=ServerNet,
+        client_model_cls=client_model_cls,
+        server_model_cls=server_model_cls,
         set_seed_fn=set_seed,
         client_size_fn=message_client_size_with_alpha,
         get_batch_fn=message_get_batch_with_alpha,
@@ -122,7 +132,7 @@ def main():
         initial_client_states=initial_client_states,
         initial_server_state=initial_server_state,
         on_finished_fn=on_finished_fn,
-        evaluate_fn=evaluate_split_model,
+        evaluate_fn=evaluate_split_model_for_dataset,
         print_metrics_fn=print_test_metrics,
         max_batches=args.max_batches or None,
         eval_every_round=args.eval_every_round,

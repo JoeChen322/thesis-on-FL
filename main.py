@@ -30,6 +30,7 @@ def parse_args():
     parser.add_argument("--num-clients", type=int, required=True)
     parser.add_argument("--num-rounds", type=int, default=3)
     parser.add_argument("--method", choices=("auto", "fl", "sl", "sfl"), default="auto")
+    parser.add_argument("--dataset", choices=("mnist", "cifar10"), default="mnist")
     parser.add_argument(
         "--client-cpus",
         default="1",
@@ -77,7 +78,7 @@ def parse_args():
     parser.add_argument(
         "--checkpoint-path",
         default="",
-        help="Shared checkpoint path used by FL/SL/SFL. Defaults to checkpoint-dir/shared_<num-clients>clients_alpha<noniid-alpha>_checkpoint.pt.",
+        help="Shared checkpoint path used by FL/SL/SFL. Defaults to checkpoint-dir/shared_<dataset>_<num-clients>clients_alpha<noniid-alpha>_checkpoint.pt.",
     )
     parser.add_argument(
         "--noniid-alpha",
@@ -111,7 +112,7 @@ def parse_args():
     parser.add_argument(
         "--eval-every-round",
         action="store_true",
-        help="Evaluate the full MNIST test set after every SL/SFL round.",
+        help="Evaluate the full test set after every SL/SFL round.",
     )
     return parser.parse_args()
 
@@ -130,7 +131,10 @@ def shared_checkpoint_path(project_root, args):
     return (
         project_root
         / args.checkpoint_dir
-        / f"shared_{args.num_clients}clients_alpha{alpha_label}_checkpoint.pt"
+        / (
+            f"shared_{args.dataset}_{args.num_clients}clients_"
+            f"alpha{alpha_label}_checkpoint.pt"
+        )
     )
 
 
@@ -182,6 +186,8 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
             str(args.client_gpus),
             "--local-epochs",
             str(args.local_epochs),
+            "--dataset",
+            args.dataset,
         ]
         if checkpoint_path is not None:
             command.extend(["--checkpoint-path", str(checkpoint_path)])
@@ -202,6 +208,8 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
             str(args.client_gpus),
             "--local-epochs",
             str(args.local_epochs),
+            "--dataset",
+            args.dataset,
         ]
         if checkpoint_path is not None:
             command.extend(["--checkpoint-path", str(checkpoint_path)])
@@ -233,6 +241,8 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
             str(args.client_gpus),
             "--local-epochs",
             str(args.local_epochs),
+            "--dataset",
+            args.dataset,
         ]
         if checkpoint_path is not None:
             command.extend(["--checkpoint-path", str(checkpoint_path)])
@@ -316,6 +326,7 @@ def run_once(args, project_root, python_executable, method, selection_reason):
 
     print(f"Selected method: {method.upper()} for {args.num_clients} clients", flush=True)
     print(f"Selection reason: {selection_reason}", flush=True)
+    print(f"Dataset: {args.dataset}", flush=True)
     if args.adaptive_noniid_switch:
         print(
             "Boundary non-IID switch: enabled; clients report one local JSD scalar",
@@ -336,6 +347,7 @@ def run_with_adaptive_switch(args, project_root, python_executable, method, sele
 
     print(f"Initial method: {method.upper()} for {args.num_clients} clients", flush=True)
     print(f"Initial selection reason: {selection_reason}", flush=True)
+    print(f"Dataset: {args.dataset}", flush=True)
     if args.adaptive_noniid_switch:
         print(
             "Boundary non-IID switch: enabled; clients report one local JSD scalar",

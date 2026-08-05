@@ -1,29 +1,28 @@
-"for a test set to be evaluated"
-import torch
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
-import torch
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from split_learning_utils import load_mnist_dataset
+from split_learning_utils import load_dataset
 
 
-def make_testloader(test_batch_size=128):
+def make_testloader(test_batch_size=128, dataset_name="mnist"):
     return DataLoader(
-        load_mnist_dataset(train=False),
+        load_dataset(dataset_name, train=False),
         batch_size=test_batch_size,
         shuffle=False,
     )
 
 
-def evaluate_model(model, device, testloader=None, test_batch_size=128):
+def evaluate_model(
+    model,
+    device,
+    testloader=None,
+    test_batch_size=128,
+    dataset_name="mnist",
+):
     model.eval()
     if testloader is None:
-        testloader = make_testloader(test_batch_size)
+        testloader = make_testloader(test_batch_size, dataset_name)
 
     total_loss = 0.0
     total_correct = 0
@@ -46,11 +45,12 @@ def evaluate_split_model(
     device,
     testloader=None,
     test_batch_size=128,
+    dataset_name="mnist",
 ):
     client_model.eval()
     server_model.eval()
     if testloader is None:
-        testloader = make_testloader(test_batch_size)
+        testloader = make_testloader(test_batch_size, dataset_name)
 
     total_loss = 0.0
     total_correct = 0

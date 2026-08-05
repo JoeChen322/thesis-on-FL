@@ -82,6 +82,14 @@
    python .\main.py --method fl --num-clients 3 --num-rounds 3 --noniid-alpha 0.2
    ```
 
+   MNIST is still the default dataset. CIFAR-10 can be selected with
+   `--dataset cifar10`; the first run downloads it under `.\data`.
+
+   Example:
+   ```bash
+   python .\main.py --method sfl --dataset cifar10 --num-clients 3 --num-rounds 3 --max-batches 5
+   ```
+
 7. Boundary-Scalar Non-IID Detection and Pattern Toggling
 
    The training path does not send raw per-class counts or full label

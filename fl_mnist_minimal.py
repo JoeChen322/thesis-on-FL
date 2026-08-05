@@ -21,6 +21,7 @@ from split_learning_utils import (
     check_simulation_backend,
     client_size,
     fedavg_state_dicts,
+    get_model_classes,
     load_data,
     load_split_checkpoint,
     save_split_checkpoint,
@@ -65,15 +66,17 @@ def set_parameters(model, parameters):
 # Flower client
 # -----------------------------
 class FlowerClient(fl.client.NumPyClient):
-    def __init__(self, client_id, num_clients, device, noniid_alpha):
+    def __init__(self, client_id, num_clients, device, noniid_alpha, dataset_name):
         self.client_id = client_id
         self.device = device
 
-        self.model = FullNet().to(device)
+        client_model_cls, server_model_cls = get_model_classes(dataset_name)
+        self.model = FullNet(client_model_cls, server_model_cls).to(device)
         self.trainloader, self.testloader = load_data(
             client_id,
             num_clients,
             noniid_alpha=noniid_alpha,
+            dataset_name=dataset_name,
         )
 
     def get_parameters(self, config):
@@ -131,25 +134,31 @@ def aggregate_parameters(results):
     return aggregated
 
 
-def load_checkpoint(checkpoint_path, model, num_clients, device, noniid_alpha):
+def load_checkpoint(checkpoint_path, model, num_clients, device, noniid_alpha, dataset_name):
     client_states, server_state = load_split_checkpoint(
         checkpoint_path,
         num_clients,
         device,
         noniid_alpha,
+        dataset_name,
     )
     if client_states is None:
         return
 
     sizes = [
-        client_size(num_clients, client_id, noniid_alpha)
+        client_size(
+            num_clients,
+            client_id,
+            noniid_alpha,
+            dataset_name=dataset_name,
+        )
         for client_id in range(num_clients)
     ]
     model.client_model.load_state_dict(fedavg_state_dicts(client_states, sizes))
     model.server_model.load_state_dict(server_state)
 
 
-def save_checkpoint(checkpoint_path, model, num_clients, noniid_alpha):
+def save_checkpoint(checkpoint_path, model, num_clients, noniid_alpha, dataset_name):
     client_states = [
         model.client_model.state_dict()
         for _ in range(num_clients)
@@ -160,6 +169,7 @@ def save_checkpoint(checkpoint_path, model, num_clients, noniid_alpha):
         model.server_model,
         num_clients,
         noniid_alpha,
+        dataset_name,
     )
 
 
@@ -200,11 +210,17 @@ class ReportingFedAvg(fl.server.strategy.FedAvg):
         return loss, metrics
 
 
-def make_client_app(num_clients, noniid_alpha):
+def make_client_app(num_clients, noniid_alpha, dataset_name):
     def client_fn(context):
         client_id = int(context.node_config["partition-id"])
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        return FlowerClient(client_id, num_clients, device, noniid_alpha).to_client()
+        return FlowerClient(
+            client_id,
+            num_clients,
+            device,
+            noniid_alpha,
+            dataset_name,
+        ).to_client()
 
     return ClientApp(client_fn=client_fn)
 
@@ -227,11 +243,20 @@ def start_simulation(
     client_num_cpus=1.0,
     client_num_gpus=0.0,
     noniid_alpha=1.0,
+    dataset_name="mnist",
 ):
     set_seed()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    global_model = FullNet().to(device)
-    load_checkpoint(checkpoint_path, global_model, num_clients, device, noniid_alpha)
+    client_model_cls, server_model_cls = get_model_classes(dataset_name)
+    global_model = FullNet(client_model_cls, server_model_cls).to(device)
+    load_checkpoint(
+        checkpoint_path,
+        global_model,
+        num_clients,
+        device,
+        noniid_alpha,
+        dataset_name,
+    )
     initial_parameters = ndarrays_to_parameters(get_parameters(global_model))
     strategy = ReportingFedAvg(
         fraction_fit=1.0,
@@ -245,6 +270,7 @@ def start_simulation(
     )
 
     print(f"Device: {device}")
+    print(f"Dataset: {dataset_name}")
     print(f"Number of clients: {num_clients}")
     print(f"Non-IID alpha: {noniid_alpha}")
     print("Start Flower FL simulation")
@@ -257,7 +283,7 @@ def start_simulation(
     )
     run_simulation(
         server_app=make_server_app(num_rounds, num_clients, strategy),
-        client_app=make_client_app(num_clients, noniid_alpha),
+        client_app=make_client_app(num_clients, noniid_alpha, dataset_name),
         num_supernodes=num_clients,
         backend_config=backend_config,
         verbose_logging=True,
@@ -266,9 +292,9 @@ def start_simulation(
     print("\nTraining finished.")
     if strategy.current_parameters is not None:
         set_parameters(global_model, parameters_to_ndarrays(strategy.current_parameters))
-    loss, accuracy = evaluate_model(global_model, device)
+    loss, accuracy = evaluate_model(global_model, device, dataset_name=dataset_name)
     print_test_metrics("Final", loss, accuracy)
-    save_checkpoint(checkpoint_path, global_model, num_clients, noniid_alpha)
+    save_checkpoint(checkpoint_path, global_model, num_clients, noniid_alpha, dataset_name)
 
 
 def parse_args():
@@ -279,6 +305,7 @@ def parse_args():
     parser.add_argument("--checkpoint-path", default="")
     parser.add_argument("--client-num-cpus", type=float, default=1.0)
     parser.add_argument("--client-num-gpus", type=float, default=0.0)
+    parser.add_argument("--dataset", choices=("mnist", "cifar10"), default="mnist")
     parser.add_argument(
         "--noniid-alpha",
         type=float,
@@ -300,4 +327,5 @@ if __name__ == "__main__":
         args.client_num_cpus,
         args.client_num_gpus,
         args.noniid_alpha,
+        args.dataset,
     )
