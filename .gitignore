@@ -1,0 +1,10 @@
+.venv/
+.venv311/
+__pycache__/
+*.py[cod]
+
+data/
+.checkpoints/
+*.pt
+*.pth
+*.log

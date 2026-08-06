@@ -128,3 +128,34 @@
 ```bash
 python .\main.py --method sl --num-clients 2 --client-cpus 1,1 --num-rounds 3 --adaptive-communication-switch --communication-delay 0,8,5 
 ```
+
+## Docker
+
+Build the image:
+
+```bash
+docker build -t minst-for-sfl .
+```
+
+Run a small smoke-test training job:
+
+```bash
+docker run --rm -v ${PWD}/data:/app/data -v ${PWD}/.checkpoints:/app/.checkpoints minst-for-sfl
+```
+
+Run with custom training arguments:
+
+```bash
+docker run --rm -v ${PWD}/data:/app/data -v ${PWD}/.checkpoints:/app/.checkpoints minst-for-sfl python main.py --method auto --num-clients 3 --client-cpus 1 --num-rounds 3 --max-batches 5
+```
+
+Or use Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+Notes:
+- The image runs on CPU by default.
+- `./data` and `./.checkpoints` are mounted as volumes so downloaded datasets and checkpoints persist outside the container.
+- Set `SIMULATION_TOTAL_CPUS` and `--client-cpus` together when increasing the number of clients. For example, four clients with one CPU each usually need `-e SIMULATION_TOTAL_CPUS=4 --cpus 4`.

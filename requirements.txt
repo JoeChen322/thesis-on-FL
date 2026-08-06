@@ -1,0 +1,5 @@
+flwr[simulation]==1.32.1
+ray==2.55.1
+numpy==2.4.6
+torch==2.13.0
+torchvision==0.28.0

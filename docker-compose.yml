@@ -1,0 +1,26 @@
+services:
+  minst-for-sfl:
+    build: .
+    image: minst-for-sfl:latest
+    environment:
+      SIMULATION_TOTAL_CPUS: "2"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    volumes:
+      - ./data:/app/data
+      - ./.checkpoints:/app/.checkpoints
+    command:
+      - python
+      - main.py
+      - --method
+      - sl
+      - --num-clients
+      - "2"
+      - --client-cpus
+      - "1"
+      - --num-rounds
+      - "1"
+      - --max-batches
+      - "1"
