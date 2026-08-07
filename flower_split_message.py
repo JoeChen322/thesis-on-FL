@@ -19,6 +19,9 @@ from torch import nn
 from split_learning_utils import (
     build_ray_backend_config,
     check_simulation_backend,
+    client_num_threads,
+    configure_thread_env,
+    configure_torch_threads,
 )
 from noniid_jsd_switch import (
     DEFAULT_IID_JSD_THRESHOLD,
@@ -26,29 +29,6 @@ from noniid_jsd_switch import (
     classify_noniid_condition,
     validate_jsd_thresholds,
 )
-
-
-THREAD_ENV_VARS = (
-    "OMP_NUM_THREADS",
-    "MKL_NUM_THREADS",
-    "OPENBLAS_NUM_THREADS",
-    "NUMEXPR_NUM_THREADS",
-)
-
-
-def client_num_threads(num_cpus):
-    return max(1, math.ceil(float(num_cpus)))
-
-
-def configure_thread_env(num_threads):
-    for env_var in THREAD_ENV_VARS:
-        os.environ[env_var] = str(num_threads)
-
-
-def configure_torch_threads(num_threads):
-    configure_thread_env(num_threads)
-    torch.set_num_threads(num_threads)
-    return torch.get_num_threads()
 
 
 def log_client_trace(

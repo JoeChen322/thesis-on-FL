@@ -20,6 +20,9 @@ from split_learning_utils import (
     build_ray_backend_config,
     check_simulation_backend,
     client_size,
+    client_num_threads,
+    configure_thread_env,
+    configure_torch_threads,
     fedavg_state_dicts,
     get_model_classes,
     load_data,
@@ -66,9 +69,19 @@ def set_parameters(model, parameters):
 # Flower client
 # -----------------------------
 class FlowerClient(fl.client.NumPyClient):
-    def __init__(self, client_id, num_clients, device, noniid_alpha, dataset_name):
+    def __init__(
+        self,
+        client_id,
+        num_clients,
+        device,
+        noniid_alpha,
+        dataset_name,
+        num_threads,
+    ):
+        configure_torch_threads(num_threads)
         self.client_id = client_id
         self.device = device
+        self.num_threads = num_threads
 
         client_model_cls, server_model_cls = get_model_classes(dataset_name)
         self.model = FullNet(client_model_cls, server_model_cls).to(device)
@@ -80,9 +93,11 @@ class FlowerClient(fl.client.NumPyClient):
         )
 
     def get_parameters(self, config):
+        configure_torch_threads(self.num_threads)
         return get_parameters(self.model)
 
     def fit(self, parameters, config):
+        configure_torch_threads(self.num_threads)
         set_parameters(self.model, parameters)
 
         train(
@@ -99,6 +114,7 @@ class FlowerClient(fl.client.NumPyClient):
         )
 
     def evaluate(self, parameters, config):
+        configure_torch_threads(self.num_threads)
         set_parameters(self.model, parameters)
 
         loss, accuracy = evaluate_model(
@@ -210,8 +226,9 @@ class ReportingFedAvg(fl.server.strategy.FedAvg):
         return loss, metrics
 
 
-def make_client_app(num_clients, noniid_alpha, dataset_name):
+def make_client_app(num_clients, noniid_alpha, dataset_name, num_threads):
     def client_fn(context):
+        configure_torch_threads(num_threads)
         client_id = int(context.node_config["partition-id"])
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         return FlowerClient(
@@ -220,6 +237,7 @@ def make_client_app(num_clients, noniid_alpha, dataset_name):
             device,
             noniid_alpha,
             dataset_name,
+            num_threads,
         ).to_client()
 
     return ClientApp(client_fn=client_fn)
@@ -246,6 +264,8 @@ def start_simulation(
     dataset_name="mnist",
 ):
     set_seed()
+    num_threads = client_num_threads(client_num_cpus)
+    configure_thread_env(num_threads)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     client_model_cls, server_model_cls = get_model_classes(dataset_name)
     global_model = FullNet(client_model_cls, server_model_cls).to(device)
@@ -273,6 +293,7 @@ def start_simulation(
     print(f"Dataset: {dataset_name}")
     print(f"Number of clients: {num_clients}")
     print(f"Non-IID alpha: {noniid_alpha}")
+    print(f"Client PyTorch threads per actor: {num_threads}")
     print("Start Flower FL simulation")
 
     total_num_cpus = check_simulation_backend(num_clients, client_num_cpus)
@@ -283,7 +304,12 @@ def start_simulation(
     )
     run_simulation(
         server_app=make_server_app(num_rounds, num_clients, strategy),
-        client_app=make_client_app(num_clients, noniid_alpha, dataset_name),
+        client_app=make_client_app(
+            num_clients,
+            noniid_alpha,
+            dataset_name,
+            num_threads,
+        ),
         num_supernodes=num_clients,
         backend_config=backend_config,
         verbose_logging=True,

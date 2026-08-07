@@ -18,6 +18,27 @@ _DATASET_CACHE = {}
 _SPLIT_CACHE = {}
 MIN_DIRICHLET_ALPHA = 1e-3
 SIMULATION_TOTAL_CPUS_ENV = "SIMULATION_TOTAL_CPUS"
+THREAD_ENV_VARS = (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+)
+
+
+def client_num_threads(num_cpus):
+    return max(1, math.ceil(float(num_cpus)))
+
+
+def configure_thread_env(num_threads):
+    for env_var in THREAD_ENV_VARS:
+        os.environ[env_var] = str(num_threads)
+
+
+def configure_torch_threads(num_threads):
+    configure_thread_env(num_threads)
+    torch.set_num_threads(num_threads)
+    return torch.get_num_threads()
 
 
 class ClientNet(nn.Module):
