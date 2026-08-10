@@ -71,6 +71,16 @@ def parse_args():
         help="Switch method when communication time is higher than the previous round by this ratio.",
     )
     parser.add_argument(
+        "--time-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Fixed per-round total time threshold in seconds. When set with "
+            "--adaptive-communication-switch, any SL/SFL round above this "
+            "threshold switches the next round directly to FL."
+        ),
+    )
+    parser.add_argument(
         "--checkpoint-dir",
         default=".checkpoints",
         help="Directory used to save the shared checkpoint.",
@@ -344,6 +354,8 @@ def run_once(args, project_root, python_executable, method, selection_reason):
 def run_with_adaptive_switch(args, project_root, python_executable, method, selection_reason):
     communication_delays = parse_communication_delay(args.communication_delay)
     previous_communication_time = None
+    if args.time_threshold is not None and args.time_threshold < 0:
+        raise ValueError("--time-threshold must be non-negative")
 
     print(f"Initial method: {method.upper()} for {args.num_clients} clients", flush=True)
     print(f"Initial selection reason: {selection_reason}", flush=True)
@@ -355,11 +367,18 @@ def run_with_adaptive_switch(args, project_root, python_executable, method, sele
         )
     print(f"Shared non-IID alpha: {args.noniid_alpha}", flush=True)
     print(f"Using Python: {python_executable}", flush=True)
-    print(
-        "Adaptive rule: switch when communication time grows "
-        f"more than {args.switch_threshold * 100:.1f}% from the previous round",
-        flush=True,
-    )
+    if args.time_threshold is not None:
+        print(
+            "Adaptive rule: switch SL/SFL directly to FL when total round time "
+            f"exceeds {args.time_threshold:.4f}s",
+            flush=True,
+        )
+    else:
+        print(
+            "Adaptive rule: switch when communication time grows "
+            f"more than {args.switch_threshold * 100:.1f}% from the previous round",
+            flush=True,
+        )
 
     for round_index in range(args.num_rounds):
         round_number = round_index + 1
@@ -378,20 +397,43 @@ def run_with_adaptive_switch(args, project_root, python_executable, method, sele
             num_rounds=1,
             checkpoint_path=shared_checkpoint_path(project_root, args),
         )
-        communication_time = run_command(
+        round_time = run_command(
             command,
             project_root,
             simulated_delay=communication_delay_for_round(communication_delays, round_index),
         )
 
-        if previous_communication_time is not None:
+        if args.time_threshold is not None:
+            if round_time > args.time_threshold:
+                old_method = method
+                method = "fl"
+                if method != old_method:
+                    print(
+                        f"Round {round_number}: {round_time:.4f}s > "
+                        f"{args.time_threshold:.4f}s, next round switches "
+                        f"{old_method.upper()} -> FL",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"Round {round_number}: {round_time:.4f}s > "
+                        f"{args.time_threshold:.4f}s, next round keeps FL",
+                        flush=True,
+                    )
+            else:
+                print(
+                    f"Round {round_number}: {round_time:.4f}s within fixed threshold, "
+                    f"next round keeps {method.upper()}",
+                    flush=True,
+                )
+        elif previous_communication_time is not None:
             switch_limit = previous_communication_time * (1 + args.switch_threshold)
-            if communication_time > switch_limit:
+            if round_time > switch_limit:
                 old_method = method
                 method = switch_method(method)
                 if method != old_method:
                     print(
-                        f"Round {round_number}: {communication_time:.4f}s > "
+                        f"Round {round_number}: {round_time:.4f}s > "
                         f"{previous_communication_time:.4f}s + "
                         f"{args.switch_threshold * 100:.1f}%, next round switches "
                         f"{old_method.upper()} -> {method.upper()}",
@@ -399,7 +441,7 @@ def run_with_adaptive_switch(args, project_root, python_executable, method, sele
                     )
                 else:
                     print(
-                        f"Round {round_number}: {communication_time:.4f}s > "
+                        f"Round {round_number}: {round_time:.4f}s > "
                         f"{previous_communication_time:.4f}s + "
                         f"{args.switch_threshold * 100:.1f}%, "
                         f"but {method.upper()} delay switching is disabled",
@@ -407,12 +449,12 @@ def run_with_adaptive_switch(args, project_root, python_executable, method, sele
                     )
             else:
                 print(
-                    f"Round {round_number}: {communication_time:.4f}s within threshold, "
+                    f"Round {round_number}: {round_time:.4f}s within threshold, "
                     f"next round keeps {method.upper()}",
                     flush=True,
                 )
 
-        previous_communication_time = communication_time
+        previous_communication_time = round_time
 
 
 def main():
