@@ -58,6 +58,55 @@ def log_client_trace(
     return now_perf
 
 
+class RuntimeStats:
+    def __init__(self):
+        self.total_start = time.perf_counter()
+        self.communication_time = 0.0
+        self.training_time = 0.0
+        self.delay_time = 0.0
+
+    def add_communication(self, duration):
+        self.communication_time += duration
+
+    def add_training(self, duration):
+        self.training_time += duration
+
+    def add_delay(self, duration):
+        self.delay_time += duration
+        self.communication_time += duration
+
+    def total_runtime(self):
+        return time.perf_counter() - self.total_start + self.delay_time
+
+    def print_summary(self, label):
+        print(
+            f"{label} runtime stats: "
+            f"total_runtime={self.total_runtime():.4f}s "
+            f"communication_time={self.communication_time:.4f}s "
+            f"delay_time={self.delay_time:.4f}s "
+            f"training_time={self.training_time:.4f}s",
+            flush=True,
+        )
+
+
+def parse_communication_delays(value):
+    if isinstance(value, (int, float)):
+        delays = [float(value)]
+    else:
+        delays = [float(item.strip()) for item in str(value).split(",") if item.strip()]
+    if not delays:
+        delays = [0.0]
+    if any(delay < 0 for delay in delays):
+        raise ValueError("communication_delay must contain non-negative seconds")
+    return delays
+
+
+def communication_delay_for_round(delays, round_index):
+    if round_index < len(delays):
+        return delays[round_index]
+    return delays[-1]
+
+
 class PatternTogglingManager:
     def __init__(
         self,
@@ -145,6 +194,7 @@ def make_client_app(
         with torch.no_grad():
             activation = client_model(x)
 
+        duration_s = time.perf_counter() - start_perf
         content = RecordDict({
             "activation": ArrayRecord.from_numpy_ndarrays([
                 activation.detach().cpu().numpy()
@@ -156,6 +206,7 @@ def make_client_app(
                 "client_id": client_id,
                 "batch_index": batch_index,
                 "num_examples": int(y.size(0)),
+                "duration_s": duration_s,
             }),
         })
         log_client_trace(
@@ -203,6 +254,7 @@ def make_client_app(
         optimizer.step()
         context.state["client_model"] = model_to_record(client_model)
 
+        duration_s = time.perf_counter() - start_perf
         log_client_trace(
             "backward",
             "END",
@@ -216,6 +268,7 @@ def make_client_app(
                 "client_id": client_id,
                 "batch_index": batch_index,
                 "updated": 1,
+                "duration_s": duration_s,
             })
         }), reply_to=message)
 
@@ -281,6 +334,7 @@ def make_server_app(
     boundary_switch_enabled: bool,
     iid_jsd_threshold: float,
     strong_noniid_jsd_threshold: float,
+    communication_delays,
 ):
     app = ServerApp()
 
@@ -315,6 +369,22 @@ def make_server_app(
                 min(num_batches, max_batches)
                 for num_batches in num_batches_by_client
             ]
+        stats = RuntimeStats()
+        round_stats = None
+
+        def send_and_receive_timed(msgs, stat_label=None):
+            start_perf = time.perf_counter()
+            replies = list(grid.send_and_receive(msgs))
+            elapsed = time.perf_counter() - start_perf
+            stats.add_communication(elapsed)
+            if round_stats is not None:
+                round_stats.add_communication(elapsed)
+            if stat_label is not None:
+                print(
+                    f"TIMING {stat_label} communication_time={elapsed:.4f}s",
+                    flush=True,
+                )
+            return replies
 
         def get_client_states(group_id):
             msgs = [
@@ -326,7 +396,10 @@ def make_server_app(
                 )
                 for node_id in node_ids
             ]
-            param_replies = list(grid.send_and_receive(msgs))
+            param_replies = send_and_receive_timed(
+                msgs,
+                stat_label=f"{group_id}",
+            )
             return [
                 record_to_state_dict(reply.content["client_model"])
                 for reply in param_replies
@@ -342,7 +415,10 @@ def make_server_app(
                 )
                 for node_id in node_ids
             ]
-            list(grid.send_and_receive(msgs))
+            send_and_receive_timed(
+                msgs,
+                stat_label=f"{group_id}",
+            )
 
         def collect_boundary_conditions(group_id):
             msgs = [
@@ -359,7 +435,10 @@ def make_server_app(
                 )
                 for client_id, node_id in enumerate(node_ids)
             ]
-            replies = list(grid.send_and_receive(msgs))
+            replies = send_and_receive_timed(
+                msgs,
+                stat_label=f"{group_id}",
+            )
             return {
                 int(reply.content["metrics"]["client_id"]): float(
                     reply.content["metrics"]["boundary_score"]
@@ -446,6 +525,7 @@ def make_server_app(
             )
 
         for round_idx in range(1, num_rounds + 1):
+            round_stats = RuntimeStats()
             total_loss = 0.0
             total_correct = 0
             total_examples = 0
@@ -479,10 +559,18 @@ def make_server_app(
                     if not forward_msgs:
                         continue
 
-                    forward_replies_by_client = {
-                        int(reply.content["metrics"]["client_id"]): reply
-                        for reply in grid.send_and_receive(forward_msgs)
-                    }
+                    forward_replies = send_and_receive_timed(
+                        forward_msgs,
+                        stat_label=f"round={round_idx} batch={batch_index} forward",
+                    )
+                    forward_replies_by_client = {}
+                    for reply in forward_replies:
+                        metrics = reply.content["metrics"]
+                        forward_replies_by_client[int(metrics["client_id"])] = reply
+                        if "duration_s" in metrics:
+                            duration = float(metrics["duration_s"])
+                            stats.add_training(duration)
+                            round_stats.add_training(duration)
 
                     backward_msgs = []
                     for client_id, node_id in active_clients:
@@ -498,12 +586,16 @@ def make_server_app(
                             dtype=torch.long,
                         )
 
+                        train_start_perf = time.perf_counter()
                         server_optimizer.zero_grad()
                         outputs = server_model(activation)
                         #compute the loss
                         loss = criterion(outputs, labels)
                         loss.backward()
                         server_optimizer.step()
+                        train_elapsed = time.perf_counter() - train_start_perf
+                        stats.add_training(train_elapsed)
+                        round_stats.add_training(train_elapsed)
 
                         grad = activation.grad.detach().cpu().numpy()
                         backward_config = ConfigRecord({
@@ -532,25 +624,47 @@ def make_server_app(
                         ).sum().item()
                         total_examples += num_examples
 
-                    list(grid.send_and_receive(backward_msgs))
+                    backward_replies = send_and_receive_timed(
+                        backward_msgs,
+                        stat_label=f"round={round_idx} batch={batch_index} backward",
+                    )
+                    for reply in backward_replies:
+                        metrics = reply.content["metrics"]
+                        if "duration_s" in metrics:
+                            duration = float(metrics["duration_s"])
+                            stats.add_training(duration)
+                            round_stats.add_training(duration)
 
             for client_id, num_batches in enumerate(num_batches_by_client):
                 print(f"Client {client_id} -> server: finished {num_batches} batches")
 
             if pattern_manager.use_client_fedavg:
                 client_states = get_client_states(f"{round_idx}-get-client-params")
+                fedavg_start_perf = time.perf_counter()
                 #get the average value
                 avg_state = fedavg_fn(client_states, sizes)
                 #switch the dict form into message form
                 avg_record = ArrayRecord.from_torch_state_dict(avg_state)
+                fedavg_elapsed = time.perf_counter() - fedavg_start_perf
+                stats.add_training(fedavg_elapsed)
+                round_stats.add_training(fedavg_elapsed)
 
                 set_client_states(avg_record, f"{round_idx}-set-client-params")
                 print("SFL client-side FedAvg: completed")
+
+            round_delay = communication_delay_for_round(
+                communication_delays,
+                round_idx - 1,
+            )
+            if round_delay > 0:
+                stats.add_delay(round_delay)
+                round_stats.add_delay(round_delay)
 
             print("--------------------------------")
             print(f"Round {round_idx} summary:")
             print(f"Average train loss: {total_loss / total_examples:.4f}")
             print(f"Average train acc:  {total_correct / total_examples * 100:.2f}%")
+            round_stats.print_summary(f"Round {round_idx}")
             if eval_every_round:
                 evaluate_current_models(f"Round {round_idx}")
 
@@ -559,6 +673,7 @@ def make_server_app(
         if on_finished_fn is not None:
             client_states = get_client_states("save-client-params")
             on_finished_fn(client_states, server_model)
+        stats.print_summary("Total")
 
     return app
 
@@ -590,7 +705,9 @@ def run_message_simulation(
     boundary_switch_enabled: bool = False,
     iid_jsd_threshold: float = DEFAULT_IID_JSD_THRESHOLD,
     strong_noniid_jsd_threshold: float = DEFAULT_STRONG_NONIID_JSD_THRESHOLD,
+    communication_delay=0.0,
 ):
+    communication_delays = parse_communication_delays(communication_delay)
     num_threads = client_num_threads(num_cpus)
     configure_thread_env(num_threads)
     total_num_cpus = check_simulation_backend(
@@ -622,6 +739,7 @@ def run_message_simulation(
         boundary_switch_enabled=boundary_switch_enabled,
         iid_jsd_threshold=iid_jsd_threshold,
         strong_noniid_jsd_threshold=strong_noniid_jsd_threshold,
+        communication_delays=communication_delays,
     )
     client_app = make_client_app(
         client_model_cls,

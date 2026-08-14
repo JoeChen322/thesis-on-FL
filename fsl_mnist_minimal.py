@@ -40,6 +40,11 @@ def parse_args():
     parser.add_argument("--max-batches", type=int, default=0)
     parser.add_argument("--dataset", choices=("mnist", "cifar10"), default="mnist")
     parser.add_argument(
+        "--communication-delay",
+        default="0",
+        help="Extra simulated communication delay seconds per round. Use one value or comma-separated values.",
+    )
+    parser.add_argument(
         "--eval-every-round",
         action="store_true",
         help="Evaluate the full test set after every round.",
@@ -140,6 +145,7 @@ def main():
         boundary_switch_enabled=args.boundary_noniid_switch,
         iid_jsd_threshold=args.iid_jsd_threshold,
         strong_noniid_jsd_threshold=args.strong_noniid_jsd_threshold,
+        communication_delay=args.communication_delay,
     )
 
 

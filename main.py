@@ -173,7 +173,15 @@ def simulation_client_num_cpus(args):
     return float(cpu_counts[0])
 
 
-def build_command(args, project_root, python_executable, method, num_rounds, checkpoint_path=None):
+def build_command(
+    args,
+    project_root,
+    python_executable,
+    method,
+    num_rounds,
+    checkpoint_path=None,
+    communication_delay=None,
+):
     client_num_cpus = simulation_client_num_cpus(args)
     if args.noniid_alpha < 0.0 or args.noniid_alpha > 1.0:
         raise ValueError("--noniid-alpha must be in the range [0, 1]")
@@ -202,6 +210,8 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
         if checkpoint_path is not None:
             command.extend(["--checkpoint-path", str(checkpoint_path)])
         command.extend(["--noniid-alpha", str(args.noniid_alpha)])
+        if communication_delay is not None:
+            command.extend(["--communication-delay", str(communication_delay)])
         return command
 
     if method == "sfl":
@@ -224,6 +234,8 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
         if checkpoint_path is not None:
             command.extend(["--checkpoint-path", str(checkpoint_path)])
         command.extend(["--noniid-alpha", str(args.noniid_alpha)])
+        if communication_delay is not None:
+            command.extend(["--communication-delay", str(communication_delay)])
         if args.max_batches:
             command.extend(["--max-batches", str(args.max_batches)])
         if args.eval_every_round:
@@ -257,6 +269,8 @@ def build_command(args, project_root, python_executable, method, num_rounds, che
         if checkpoint_path is not None:
             command.extend(["--checkpoint-path", str(checkpoint_path)])
         command.extend(["--noniid-alpha", str(args.noniid_alpha)])
+        if communication_delay is not None:
+            command.extend(["--communication-delay", str(communication_delay)])
         if args.max_batches:
             command.extend(["--max-batches", str(args.max_batches)])
         if args.eval_every_round:
@@ -332,6 +346,7 @@ def run_once(args, project_root, python_executable, method, selection_reason):
         method=method,
         num_rounds=args.num_rounds,
         checkpoint_path=shared_checkpoint_path(project_root, args),
+        communication_delay=args.communication_delay,
     )
 
     print(f"Selected method: {method.upper()} for {args.num_clients} clients", flush=True)
@@ -396,6 +411,10 @@ def run_with_adaptive_switch(args, project_root, python_executable, method, sele
             method=method,
             num_rounds=1,
             checkpoint_path=shared_checkpoint_path(project_root, args),
+            communication_delay=communication_delay_for_round(
+                communication_delays,
+                round_index,
+            ),
         )
         round_time = run_command(
             command,

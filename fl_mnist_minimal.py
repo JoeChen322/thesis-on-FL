@@ -4,6 +4,7 @@ AND the accurancy for each client improved"""
 
 import argparse
 from collections import OrderedDict
+import time
 
 import flwr as fl
 import torch
@@ -30,6 +31,55 @@ from split_learning_utils import (
     save_split_checkpoint,
     set_seed,
 )
+
+
+class RuntimeStats:
+    def __init__(self):
+        self.total_start = time.perf_counter()
+        self.communication_time = 0.0
+        self.training_time = 0.0
+        self.delay_time = 0.0
+
+    def add_communication(self, duration):
+        self.communication_time += duration
+
+    def add_training(self, duration):
+        self.training_time += duration
+
+    def add_delay(self, duration):
+        self.delay_time += duration
+        self.communication_time += duration
+
+    def total_runtime(self):
+        return time.perf_counter() - self.total_start + self.delay_time
+
+    def print_summary(self, label):
+        print(
+            f"{label} runtime stats: "
+            f"total_runtime={self.total_runtime():.4f}s "
+            f"communication_time={self.communication_time:.4f}s "
+            f"delay_time={self.delay_time:.4f}s "
+            f"training_time={self.training_time:.4f}s",
+            flush=True,
+        )
+
+
+def parse_communication_delays(value):
+    if isinstance(value, (int, float)):
+        delays = [float(value)]
+    else:
+        delays = [float(item.strip()) for item in str(value).split(",") if item.strip()]
+    if not delays:
+        delays = [0.0]
+    if any(delay < 0 for delay in delays):
+        raise ValueError("communication_delay must contain non-negative seconds")
+    return delays
+
+
+def communication_delay_for_round(delays, round_index):
+    if round_index < len(delays):
+        return delays[round_index]
+    return delays[-1]
 
 
 # -----------------------------
@@ -100,17 +150,19 @@ class FlowerClient(fl.client.NumPyClient):
         configure_torch_threads(self.num_threads)
         set_parameters(self.model, parameters)
 
+        train_start = time.perf_counter()
         train(
             model=self.model,
             trainloader=self.trainloader,
             epochs=int(config.get("local_epochs", 1)),
             device=self.device,
         )
+        training_time = time.perf_counter() - train_start
 
         return (
             get_parameters(self.model),
             len(self.trainloader.dataset),
-            {},
+            {"training_time": training_time, "client_id": self.client_id},
         )
 
     def evaluate(self, parameters, config):
@@ -190,12 +242,32 @@ def save_checkpoint(checkpoint_path, model, num_clients, noniid_alpha, dataset_n
 
 
 class ReportingFedAvg(fl.server.strategy.FedAvg):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, communication_delays=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.current_parameters = kwargs.get("initial_parameters")
+        self.communication_delays = communication_delays or [0.0]
+        self.stats = RuntimeStats()
+        self.round_stats = None
+
+    def configure_fit(self, server_round, parameters, client_manager):
+        self.round_stats = RuntimeStats()
+        return super().configure_fit(server_round, parameters, client_manager)
 
     def aggregate_fit(self, server_round, results, failures):
+        fit_training_times = [
+            float(fit_res.metrics.get("training_time", 0.0))
+            for _, fit_res in results
+        ]
+        if fit_training_times:
+            training_time = max(fit_training_times)
+            self.stats.add_training(training_time)
+            self.round_stats.add_training(training_time)
+
+        aggregation_start = time.perf_counter()
         parameters, metrics = super().aggregate_fit(server_round, results, failures)
+        aggregation_time = time.perf_counter() - aggregation_start
+        self.stats.add_training(aggregation_time)
+        self.round_stats.add_training(aggregation_time)
         if parameters is not None:
             self.current_parameters = parameters
         return parameters, metrics
@@ -223,6 +295,23 @@ class ReportingFedAvg(fl.server.strategy.FedAvg):
             print("--------------------------------")
             print(f"Round {server_round} summary:")
             print_test_metrics("Average", loss, float(metrics["accuracy"]))
+        if self.round_stats is not None:
+            communication_time = max(
+                0.0,
+                time.perf_counter()
+                - self.round_stats.total_start
+                - self.round_stats.training_time,
+            )
+            self.stats.add_communication(communication_time)
+            self.round_stats.communication_time = communication_time
+            round_delay = communication_delay_for_round(
+                self.communication_delays,
+                server_round - 1,
+            )
+            if round_delay > 0:
+                self.stats.add_delay(round_delay)
+                self.round_stats.add_delay(round_delay)
+            self.round_stats.print_summary(f"Round {server_round}")
         return loss, metrics
 
 
@@ -262,7 +351,9 @@ def start_simulation(
     client_num_gpus=0.0,
     noniid_alpha=1.0,
     dataset_name="mnist",
+    communication_delay="0",
 ):
+    communication_delays = parse_communication_delays(communication_delay)
     set_seed()
     num_threads = client_num_threads(client_num_cpus)
     configure_thread_env(num_threads)
@@ -287,6 +378,7 @@ def start_simulation(
         initial_parameters=initial_parameters,
         on_fit_config_fn=lambda _: {"local_epochs": local_epochs},
         evaluate_metrics_aggregation_fn=weighted_average,
+        communication_delays=communication_delays,
     )
 
     print(f"Device: {device}")
@@ -321,6 +413,7 @@ def start_simulation(
     loss, accuracy = evaluate_model(global_model, device, dataset_name=dataset_name)
     print_test_metrics("Final", loss, accuracy)
     save_checkpoint(checkpoint_path, global_model, num_clients, noniid_alpha, dataset_name)
+    strategy.stats.print_summary("Total")
 
 
 def parse_args():
@@ -332,6 +425,11 @@ def parse_args():
     parser.add_argument("--client-num-cpus", type=float, default=1.0)
     parser.add_argument("--client-num-gpus", type=float, default=0.0)
     parser.add_argument("--dataset", choices=("mnist", "cifar10"), default="mnist")
+    parser.add_argument(
+        "--communication-delay",
+        default="0",
+        help="Extra simulated communication delay seconds per round. Use one value or comma-separated values.",
+    )
     parser.add_argument(
         "--noniid-alpha",
         type=float,
@@ -354,4 +452,5 @@ if __name__ == "__main__":
         args.client_num_gpus,
         args.noniid_alpha,
         args.dataset,
+        args.communication_delay,
     )
