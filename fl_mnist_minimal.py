@@ -274,18 +274,6 @@ class ReportingFedAvg(fl.server.strategy.FedAvg):
 
     def aggregate_evaluate(self, server_round, results, failures):
         print(f"\n========== Round {server_round} ==========")
-        for _, evaluate_res in sorted(
-            results,
-            key=lambda item: int(item[1].metrics.get("client_id", 0)),
-        ):
-            client_id = int(evaluate_res.metrics.get("client_id", -1))
-            accuracy = float(evaluate_res.metrics["accuracy"])
-            print(
-                f"Client {client_id}: "
-                f"test loss = {evaluate_res.loss:.4f}, "
-                f"test acc = {accuracy * 100:.2f}%"
-            )
-
         loss, metrics = super().aggregate_evaluate(
             server_round,
             results,

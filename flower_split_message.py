@@ -465,12 +465,6 @@ def make_server_app(
                 loss, accuracy = evaluate_fn(client_model, server_model, device)
                 losses.append(loss)
                 accuracies.append(accuracy)
-                if len(states_to_evaluate) > 1:
-                    if print_metrics_fn is None:
-                        print(f"{label} client {client_id} test loss: {loss:.4f}")
-                        print(f"{label} client {client_id} test acc:  {accuracy * 100:.2f}%")
-                    else:
-                        print_metrics_fn(f"{label} client {client_id}", loss, accuracy)
 
             avg_loss = sum(losses) / len(losses)
             avg_accuracy = sum(accuracies) / len(accuracies)
