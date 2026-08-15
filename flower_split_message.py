@@ -558,13 +558,16 @@ def make_server_app(
                         stat_label=f"round={round_idx} batch={batch_index} forward",
                     )
                     forward_replies_by_client = {}
+                    forward_training_times = []
                     for reply in forward_replies:
                         metrics = reply.content["metrics"]
                         forward_replies_by_client[int(metrics["client_id"])] = reply
                         if "duration_s" in metrics:
-                            duration = float(metrics["duration_s"])
-                            stats.add_training(duration)
-                            round_stats.add_training(duration)
+                            forward_training_times.append(float(metrics["duration_s"]))
+                    if forward_training_times:
+                        forward_training_time = max(forward_training_times)
+                        stats.add_training(forward_training_time)
+                        round_stats.add_training(forward_training_time)
 
                     backward_msgs = []
                     for client_id, node_id in active_clients:
@@ -622,12 +625,15 @@ def make_server_app(
                         backward_msgs,
                         stat_label=f"round={round_idx} batch={batch_index} backward",
                     )
+                    backward_training_times = []
                     for reply in backward_replies:
                         metrics = reply.content["metrics"]
                         if "duration_s" in metrics:
-                            duration = float(metrics["duration_s"])
-                            stats.add_training(duration)
-                            round_stats.add_training(duration)
+                            backward_training_times.append(float(metrics["duration_s"]))
+                    if backward_training_times:
+                        backward_training_time = max(backward_training_times)
+                        stats.add_training(backward_training_time)
+                        round_stats.add_training(backward_training_time)
 
             for client_id, num_batches in enumerate(num_batches_by_client):
                 print(f"Client {client_id} -> server: finished {num_batches} batches")
