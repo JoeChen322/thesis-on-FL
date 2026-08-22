@@ -18,6 +18,7 @@ from flwr.simulation import run_simulation
 from mnist_evaluation import evaluate_model, print_test_metrics
 from split_learning_utils import (
     FullNet,
+    add_resnet_model_args,
     build_ray_backend_config,
     check_simulation_backend,
     client_size,
@@ -26,6 +27,7 @@ from split_learning_utils import (
     configure_torch_threads,
     fedavg_state_dicts,
     get_model_classes,
+    get_resnet_model_config_from_args,
     load_data,
     load_split_checkpoint,
     save_split_checkpoint,
@@ -126,6 +128,7 @@ class FlowerClient(fl.client.NumPyClient):
         device,
         noniid_alpha,
         dataset_name,
+        model_config,
         num_threads,
     ):
         configure_torch_threads(num_threads)
@@ -133,7 +136,10 @@ class FlowerClient(fl.client.NumPyClient):
         self.device = device
         self.num_threads = num_threads
 
-        client_model_cls, server_model_cls = get_model_classes(dataset_name)
+        client_model_cls, server_model_cls = get_model_classes(
+            dataset_name,
+            model_config=model_config,
+        )
         self.model = FullNet(client_model_cls, server_model_cls).to(device)
         self.trainloader, self.testloader = load_data(
             client_id,
@@ -202,13 +208,22 @@ def aggregate_parameters(results):
     return aggregated
 
 
-def load_checkpoint(checkpoint_path, model, num_clients, device, noniid_alpha, dataset_name):
+def load_checkpoint(
+    checkpoint_path,
+    model,
+    num_clients,
+    device,
+    noniid_alpha,
+    dataset_name,
+    model_config,
+):
     client_states, server_state = load_split_checkpoint(
         checkpoint_path,
         num_clients,
         device,
         noniid_alpha,
         dataset_name,
+        model_config=model_config,
     )
     if client_states is None:
         return
@@ -226,7 +241,14 @@ def load_checkpoint(checkpoint_path, model, num_clients, device, noniid_alpha, d
     model.server_model.load_state_dict(server_state)
 
 
-def save_checkpoint(checkpoint_path, model, num_clients, noniid_alpha, dataset_name):
+def save_checkpoint(
+    checkpoint_path,
+    model,
+    num_clients,
+    noniid_alpha,
+    dataset_name,
+    model_config,
+):
     client_states = [
         model.client_model.state_dict()
         for _ in range(num_clients)
@@ -238,6 +260,7 @@ def save_checkpoint(checkpoint_path, model, num_clients, noniid_alpha, dataset_n
         num_clients,
         noniid_alpha,
         dataset_name,
+        model_config=model_config,
     )
 
 
@@ -303,7 +326,7 @@ class ReportingFedAvg(fl.server.strategy.FedAvg):
         return loss, metrics
 
 
-def make_client_app(num_clients, noniid_alpha, dataset_name, num_threads):
+def make_client_app(num_clients, noniid_alpha, dataset_name, model_config, num_threads):
     def client_fn(context):
         configure_torch_threads(num_threads)
         client_id = int(context.node_config["partition-id"])
@@ -314,6 +337,7 @@ def make_client_app(num_clients, noniid_alpha, dataset_name, num_threads):
             device,
             noniid_alpha,
             dataset_name,
+            model_config,
             num_threads,
         ).to_client()
 
@@ -340,13 +364,17 @@ def start_simulation(
     noniid_alpha=1.0,
     dataset_name="mnist",
     communication_delay="0",
+    model_config=None,
 ):
     communication_delays = parse_communication_delays(communication_delay)
     set_seed()
     num_threads = client_num_threads(client_num_cpus)
     configure_thread_env(num_threads)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    client_model_cls, server_model_cls = get_model_classes(dataset_name)
+    client_model_cls, server_model_cls = get_model_classes(
+        dataset_name,
+        model_config=model_config,
+    )
     global_model = FullNet(client_model_cls, server_model_cls).to(device)
     load_checkpoint(
         checkpoint_path,
@@ -355,6 +383,7 @@ def start_simulation(
         device,
         noniid_alpha,
         dataset_name,
+        model_config,
     )
     initial_parameters = ndarrays_to_parameters(get_parameters(global_model))
     strategy = ReportingFedAvg(
@@ -388,6 +417,7 @@ def start_simulation(
             num_clients,
             noniid_alpha,
             dataset_name,
+            model_config,
             num_threads,
         ),
         num_supernodes=num_clients,
@@ -400,7 +430,14 @@ def start_simulation(
         set_parameters(global_model, parameters_to_ndarrays(strategy.current_parameters))
     loss, accuracy = evaluate_model(global_model, device, dataset_name=dataset_name)
     print_test_metrics("Final", loss, accuracy)
-    save_checkpoint(checkpoint_path, global_model, num_clients, noniid_alpha, dataset_name)
+    save_checkpoint(
+        checkpoint_path,
+        global_model,
+        num_clients,
+        noniid_alpha,
+        dataset_name,
+        model_config,
+    )
     strategy.stats.print_summary("Total")
 
 
@@ -424,6 +461,7 @@ def parse_args():
         default=1.0,
         help="Shared Dirichlet non-IID degree in [0, 1]. 1.0 keeps IID splitting.",
     )
+    add_resnet_model_args(parser)
     return parser.parse_args()
 
 
@@ -431,6 +469,7 @@ if __name__ == "__main__":
     args = parse_args()
     if args.num_clients < 1:
         raise ValueError("--num-clients must be at least 1")
+    model_config = get_resnet_model_config_from_args(args)
     start_simulation(
         args.num_clients,
         args.num_rounds,
@@ -441,4 +480,5 @@ if __name__ == "__main__":
         args.noniid_alpha,
         args.dataset,
         args.communication_delay,
+        model_config,
     )

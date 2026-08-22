@@ -9,6 +9,7 @@ from noniid_jsd_switch import (
     DEFAULT_IID_JSD_THRESHOLD,
     DEFAULT_STRONG_NONIID_JSD_THRESHOLD,
 )
+from split_learning_utils import add_resnet_model_args
 
 
 def choose_method(args):
@@ -75,9 +76,19 @@ def parse_args():
         type=float,
         default=None,
         help=(
-            "Fixed per-round total time threshold in seconds. When set with "
-            "--adaptive-communication-switch, any SL/SFL round above this "
-            "threshold switches the next round directly to FL."
+            "Upper per-round total time threshold in seconds. When set with "
+            "--adaptive-communication-switch, any round above this threshold "
+            "switches the next round to FL."
+        ),
+    )
+    parser.add_argument(
+        "--time-threshold-low",
+        type=float,
+        default=None,
+        help=(
+            "Lower per-round total time threshold in seconds. When set with "
+            "--time-threshold, an FL round below this threshold switches back "
+            "to the most recent SL/SFL method."
         ),
     )
     parser.add_argument(
@@ -124,6 +135,7 @@ def parse_args():
         action="store_true",
         help="Evaluate the full test set after every SL/SFL round.",
     )
+    add_resnet_model_args(parser)
     return parser.parse_args()
 
 
@@ -138,14 +150,49 @@ def shared_checkpoint_path(project_root, args):
             return checkpoint_path
         return project_root / checkpoint_path
     alpha_label = str(args.noniid_alpha).replace(".", "p")
+    model_label = model_checkpoint_label(args)
     return (
         project_root
         / args.checkpoint_dir
         / (
             f"shared_{args.dataset}_{args.num_clients}clients_"
-            f"alpha{alpha_label}_checkpoint.pt"
+            f"alpha{alpha_label}_{model_label}_checkpoint.pt"
         )
     )
+
+
+def checkpoint_label_value(value):
+    return str(value).replace(",", "-").replace(".", "p")
+
+
+def model_checkpoint_label(args):
+    parts = [f"resnet{args.resnet_depth}"]
+    if args.resnet_block:
+        parts.append(args.resnet_block)
+    if args.resnet_blocks:
+        parts.append(f"blocks{checkpoint_label_value(args.resnet_blocks)}")
+    if args.resnet_widths != "64,128,256,512":
+        parts.append(f"widths{checkpoint_label_value(args.resnet_widths)}")
+    if args.resnet_split_after != "layer1":
+        parts.append(f"split{args.resnet_split_after}")
+    if args.resnet_stem_kernel != 7:
+        parts.append(f"stemk{args.resnet_stem_kernel}")
+    if args.resnet_stem_stride != 2:
+        parts.append(f"stems{args.resnet_stem_stride}")
+    return "_".join(parts)
+
+
+def extend_resnet_command_args(command, args):
+    command.extend(["--resnet-depth", str(args.resnet_depth)])
+    if args.resnet_block:
+        command.extend(["--resnet-block", args.resnet_block])
+    if args.resnet_blocks:
+        command.extend(["--resnet-blocks", args.resnet_blocks])
+    command.extend(["--resnet-widths", args.resnet_widths])
+    command.extend(["--resnet-split-after", args.resnet_split_after])
+    command.extend(["--resnet-stem-kernel", str(args.resnet_stem_kernel)])
+    command.extend(["--resnet-stem-stride", str(args.resnet_stem_stride)])
+    return command
 
 
 def parse_client_cpus(value, num_clients):
@@ -212,6 +259,7 @@ def build_command(
         command.extend(["--noniid-alpha", str(args.noniid_alpha)])
         if communication_delay is not None:
             command.extend(["--communication-delay", str(communication_delay)])
+        extend_resnet_command_args(command, args)
         return command
 
     if method == "sfl":
@@ -247,6 +295,7 @@ def build_command(
                 "--strong-noniid-jsd-threshold",
                 str(args.strong_noniid_jsd_threshold),
             ])
+        extend_resnet_command_args(command, args)
         return command
 
     if method == "sl":
@@ -282,6 +331,7 @@ def build_command(
                 "--strong-noniid-jsd-threshold",
                 str(args.strong_noniid_jsd_threshold),
             ])
+        extend_resnet_command_args(command, args)
         return command
 
     raise ValueError(f"Unknown method: {method}")
@@ -293,6 +343,14 @@ def switch_method(method):
     if method == "sfl":
         return "fl"
     return method
+
+
+def default_split_method(args):
+    if args.method in ("sl", "sfl"):
+        return args.method
+    if args.num_clients < 5:
+        return "sl"
+    return "sfl"
 
 
 def parse_communication_delay(value):
@@ -369,8 +427,16 @@ def run_once(args, project_root, python_executable, method, selection_reason):
 def run_with_adaptive_switch(args, project_root, python_executable, method, selection_reason):
     communication_delays = parse_communication_delay(args.communication_delay)
     previous_communication_time = None
+    last_split_method = method if method in ("sl", "sfl") else default_split_method(args)
     if args.time_threshold is not None and args.time_threshold < 0:
         raise ValueError("--time-threshold must be non-negative")
+    if args.time_threshold_low is not None:
+        if args.time_threshold_low < 0:
+            raise ValueError("--time-threshold-low must be non-negative")
+        if args.time_threshold is None:
+            raise ValueError("--time-threshold-low requires --time-threshold")
+        if args.time_threshold_low >= args.time_threshold:
+            raise ValueError("--time-threshold-low must be lower than --time-threshold")
 
     print(f"Initial method: {method.upper()} for {args.num_clients} clients", flush=True)
     print(f"Initial selection reason: {selection_reason}", flush=True)
@@ -383,11 +449,20 @@ def run_with_adaptive_switch(args, project_root, python_executable, method, sele
     print(f"Shared non-IID alpha: {args.noniid_alpha}", flush=True)
     print(f"Using Python: {python_executable}", flush=True)
     if args.time_threshold is not None:
-        print(
-            "Adaptive rule: switch SL/SFL directly to FL when total round time "
-            f"exceeds {args.time_threshold:.4f}s",
-            flush=True,
-        )
+        if args.time_threshold_low is None:
+            print(
+                "Adaptive rule: switch to FL when total round time "
+                f"exceeds {args.time_threshold:.4f}s",
+                flush=True,
+            )
+        else:
+            print(
+                "Adaptive rule: use time threshold interval "
+                f"[{args.time_threshold_low:.4f}s, {args.time_threshold:.4f}s]; "
+                "above upper switches to FL, below lower switches back to "
+                f"{last_split_method.upper()}",
+                flush=True,
+            )
     else:
         print(
             "Adaptive rule: switch when communication time grows "
@@ -398,6 +473,8 @@ def run_with_adaptive_switch(args, project_root, python_executable, method, sele
     for round_index in range(args.num_rounds):
         round_number = round_index + 1
         print(f"\n========== Adaptive Round {round_number}/{args.num_rounds} ==========", flush=True)
+        if method in ("sl", "sfl"):
+            last_split_method = method
 
         if previous_communication_time is not None:
             print(f"Round {round_number}: previous communication time {previous_communication_time:.4f}s", flush=True)
@@ -440,11 +517,25 @@ def run_with_adaptive_switch(args, project_root, python_executable, method, sele
                         flush=True,
                     )
             else:
-                print(
-                    f"Round {round_number}: {round_time:.4f}s within fixed threshold, "
-                    f"next round keeps {method.upper()}",
-                    flush=True,
-                )
+                if (
+                    args.time_threshold_low is not None
+                    and method == "fl"
+                    and round_time < args.time_threshold_low
+                ):
+                    old_method = method
+                    method = last_split_method
+                    print(
+                        f"Round {round_number}: {round_time:.4f}s < "
+                        f"{args.time_threshold_low:.4f}s, next round switches "
+                        f"{old_method.upper()} -> {method.upper()}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"Round {round_number}: {round_time:.4f}s within fixed threshold, "
+                        f"next round keeps {method.upper()}",
+                        flush=True,
+                    )
         elif previous_communication_time is not None:
             switch_limit = previous_communication_time * (1 + args.switch_threshold)
             if round_time > switch_limit:

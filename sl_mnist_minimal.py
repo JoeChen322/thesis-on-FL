@@ -10,10 +10,12 @@ from noniid_jsd_switch import (
     DEFAULT_STRONG_NONIID_JSD_THRESHOLD,
 )
 from split_learning_utils import (
+    add_resnet_model_args,
     client_label_boundary_score,
     client_size as message_client_size,
     fedavg_state_dicts as message_fedavg,
     get_model_classes,
+    get_resnet_model_config_from_args,
     get_batch as message_get_batch,
     load_split_checkpoint,
     save_split_checkpoint,
@@ -69,6 +71,7 @@ def parse_args():
         default=DEFAULT_STRONG_NONIID_JSD_THRESHOLD,
         help="Mean client boundary log2-JSD at or above this value is treated as strong non-IID.",
     )
+    add_resnet_model_args(parser)
     return parser.parse_args()
 
 
@@ -78,12 +81,14 @@ def main():
         raise ValueError("--num-clients must be at least 1")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model_config = get_resnet_model_config_from_args(args)
     initial_client_states, initial_server_state = load_split_checkpoint(
         args.checkpoint_path,
         args.num_clients,
         device,
         args.noniid_alpha,
         args.dataset,
+        model_config=model_config,
     )
 
     on_finished_fn = None
@@ -94,6 +99,7 @@ def main():
             num_clients=args.num_clients,
             noniid_alpha=args.noniid_alpha,
             dataset_name=args.dataset,
+            model_config=model_config,
         )
 
     message_client_size_with_alpha = partial(
@@ -115,7 +121,10 @@ def main():
         evaluate_split_model,
         dataset_name=args.dataset,
     )
-    client_model_cls, server_model_cls = get_model_classes(args.dataset)
+    client_model_cls, server_model_cls = get_model_classes(
+        args.dataset,
+        model_config=model_config,
+    )
 
     run_message_simulation(
         client_model_cls=client_model_cls,

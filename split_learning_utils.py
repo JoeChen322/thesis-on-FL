@@ -3,6 +3,7 @@ import math
 import os
 import random
 from collections import OrderedDict
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -23,6 +24,16 @@ THREAD_ENV_VARS = (
     "OPENBLAS_NUM_THREADS",
     "NUMEXPR_NUM_THREADS",
 )
+RESNET_DEPTH_PRESETS = {
+    18: ("basic", (2, 2, 2, 2)),
+    34: ("basic", (3, 4, 6, 3)),
+    50: ("bottleneck", (3, 4, 6, 3)),
+    101: ("bottleneck", (3, 4, 23, 3)),
+    152: ("bottleneck", (3, 8, 36, 3)),
+}
+RESNET_SPLIT_POINTS = ("layer1", "layer2", "layer3", "layer4")
+DEFAULT_RESNET_WIDTHS = (64, 128, 256, 512)
+CORRUPT_CHECKPOINT_SUFFIX = ".corrupt"
 
 
 def client_num_threads(num_cpus):
@@ -91,61 +102,285 @@ class BasicBlock(nn.Module):
         return self.relu(out)
 
 
-def make_resnet_layer(in_channels, out_channels, num_blocks, stride=1):
-    layers = [BasicBlock(in_channels, out_channels, stride)]
+class Bottleneck(nn.Module):
+    expansion = 4
+
+    def __init__(self, in_channels, out_channels, stride=1):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.conv2 = nn.Conv2d(
+            out_channels,
+            out_channels,
+            kernel_size=3,
+            stride=stride,
+            padding=1,
+            bias=False,
+        )
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.conv3 = nn.Conv2d(
+            out_channels,
+            out_channels * self.expansion,
+            kernel_size=1,
+            bias=False,
+        )
+        self.bn3 = nn.BatchNorm2d(out_channels * self.expansion)
+        self.relu = nn.ReLU(inplace=True)
+
+        self.downsample = None
+        if stride != 1 or in_channels != out_channels * self.expansion:
+            self.downsample = nn.Sequential(
+                nn.Conv2d(
+                    in_channels,
+                    out_channels * self.expansion,
+                    kernel_size=1,
+                    stride=stride,
+                    bias=False,
+                ),
+                nn.BatchNorm2d(out_channels * self.expansion),
+            )
+
+    def forward(self, x):
+        identity = x
+
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.relu(self.bn2(self.conv2(out)))
+        out = self.bn3(self.conv3(out))
+
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        out += identity
+        return self.relu(out)
+
+
+def parse_int_tuple(value, expected_len, option_name):
+    if isinstance(value, str):
+        values = tuple(int(item.strip()) for item in value.split(",") if item.strip())
+    else:
+        values = tuple(int(item) for item in value)
+    if len(values) != expected_len:
+        raise ValueError(f"{option_name} must contain {expected_len} comma-separated integers")
+    if any(item < 1 for item in values):
+        raise ValueError(f"{option_name} values must all be positive")
+    return values
+
+
+def normalize_resnet_config(
+    resnet_depth=18,
+    resnet_block="",
+    resnet_blocks="",
+    resnet_widths=DEFAULT_RESNET_WIDTHS,
+    resnet_split_after="layer1",
+    resnet_stem_kernel=7,
+    resnet_stem_stride=2,
+    architecture=None,
+    depth=None,
+    block=None,
+    blocks=None,
+    widths=None,
+    split_after=None,
+    stem_kernel=None,
+    stem_stride=None,
+):
+    if architecture is not None and architecture != "split_resnet":
+        raise ValueError(f"Unsupported model architecture: {architecture}")
+    if depth is not None:
+        resnet_depth = depth
+    if block is not None:
+        resnet_block = block
+    if blocks is not None:
+        resnet_blocks = blocks
+    if widths is not None:
+        resnet_widths = widths
+    if split_after is not None:
+        resnet_split_after = split_after
+    if stem_kernel is not None:
+        resnet_stem_kernel = stem_kernel
+    if stem_stride is not None:
+        resnet_stem_stride = stem_stride
+
+    depth = int(resnet_depth)
+    if depth not in RESNET_DEPTH_PRESETS:
+        choices = ", ".join(str(item) for item in sorted(RESNET_DEPTH_PRESETS))
+        raise ValueError(f"--resnet-depth must be one of: {choices}")
+
+    preset_block, preset_blocks = RESNET_DEPTH_PRESETS[depth]
+    block = (resnet_block or preset_block).lower()
+    if block not in ("basic", "bottleneck"):
+        raise ValueError("--resnet-block must be one of: basic, bottleneck")
+
+    blocks = (
+        parse_int_tuple(resnet_blocks, 4, "--resnet-blocks")
+        if resnet_blocks
+        else tuple(preset_blocks)
+    )
+    widths = parse_int_tuple(resnet_widths, 4, "--resnet-widths")
+
+    split_after = resnet_split_after.lower()
+    if split_after not in RESNET_SPLIT_POINTS:
+        raise ValueError(
+            "--resnet-split-after must be one of: "
+            + ", ".join(RESNET_SPLIT_POINTS)
+        )
+
+    stem_kernel = int(resnet_stem_kernel)
+    stem_stride = int(resnet_stem_stride)
+    if stem_kernel < 1 or stem_kernel % 2 == 0:
+        raise ValueError("--resnet-stem-kernel must be a positive odd integer")
+    if stem_stride < 1:
+        raise ValueError("--resnet-stem-stride must be positive")
+
+    return {
+        "architecture": "split_resnet",
+        "depth": depth,
+        "block": block,
+        "blocks": blocks,
+        "widths": widths,
+        "split_after": split_after,
+        "stem_kernel": stem_kernel,
+        "stem_stride": stem_stride,
+    }
+
+
+def get_resnet_model_config_from_args(args):
+    return normalize_resnet_config(
+        resnet_depth=args.resnet_depth,
+        resnet_block=args.resnet_block,
+        resnet_blocks=args.resnet_blocks,
+        resnet_widths=args.resnet_widths,
+        resnet_split_after=args.resnet_split_after,
+        resnet_stem_kernel=args.resnet_stem_kernel,
+        resnet_stem_stride=args.resnet_stem_stride,
+    )
+
+
+def add_resnet_model_args(parser):
+    parser.add_argument("--resnet-depth", type=int, default=18)
+    parser.add_argument(
+        "--resnet-block",
+        choices=("basic", "bottleneck"),
+        default="",
+        help="Override the block type selected by --resnet-depth.",
+    )
+    parser.add_argument(
+        "--resnet-blocks",
+        default="",
+        help="Comma-separated block counts for layer1..layer4, e.g. 2,2,2,2.",
+    )
+    parser.add_argument(
+        "--resnet-widths",
+        default="64,128,256,512",
+        help="Comma-separated base widths for layer1..layer4.",
+    )
+    parser.add_argument(
+        "--resnet-split-after",
+        choices=RESNET_SPLIT_POINTS,
+        default="layer1",
+        help="Split client/server model after this ResNet layer.",
+    )
+    parser.add_argument("--resnet-stem-kernel", type=int, default=7)
+    parser.add_argument("--resnet-stem-stride", type=int, default=2)
+    return parser
+
+
+def resnet_block_cls(block_name):
+    if block_name == "basic":
+        return BasicBlock
+    if block_name == "bottleneck":
+        return Bottleneck
+    raise ValueError(f"Unknown ResNet block: {block_name}")
+
+
+def make_resnet_layer(block_cls, in_channels, out_channels, num_blocks, stride=1):
+    layers = [block_cls(in_channels, out_channels, stride)]
+    next_in_channels = out_channels * block_cls.expansion
     for _ in range(1, num_blocks):
-        layers.append(BasicBlock(out_channels, out_channels))
+        layers.append(block_cls(next_in_channels, out_channels))
     return nn.Sequential(*layers)
 
 
-class ResNet18ClientNet(nn.Module):
-    def __init__(self, input_channels):
+def resnet_layer_in_channels(config, layer_index):
+    if layer_index == 0:
+        return config["widths"][0]
+    block_cls = resnet_block_cls(config["block"])
+    return config["widths"][layer_index - 1] * block_cls.expansion
+
+
+def make_configured_resnet_layer(config, layer_index):
+    in_channels = resnet_layer_in_channels(config, layer_index)
+    out_channels = config["widths"][layer_index]
+    stride = 1 if layer_index == 0 else 2
+    return make_resnet_layer(
+        resnet_block_cls(config["block"]),
+        in_channels,
+        out_channels,
+        config["blocks"][layer_index],
+        stride=stride,
+    )
+
+
+class SplitResNetClientNet(nn.Module):
+    def __init__(self, input_channels, model_config=None):
         super().__init__()
+        self.config = normalize_resnet_config(**(model_config or {}))
+        stem_padding = self.config["stem_kernel"] // 2
         self.conv1 = nn.Conv2d(
             input_channels,
-            64,
-            kernel_size=7,
-            stride=2,
-            padding=3,
+            self.config["widths"][0],
+            kernel_size=self.config["stem_kernel"],
+            stride=self.config["stem_stride"],
+            padding=stem_padding,
             bias=False,
         )
-        self.bn1 = nn.BatchNorm2d(64)
+        self.bn1 = nn.BatchNorm2d(self.config["widths"][0])
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        self.layer1 = make_resnet_layer(64, 64, num_blocks=2)
+        split_index = RESNET_SPLIT_POINTS.index(self.config["split_after"])
+        for layer_index in range(split_index + 1):
+            setattr(
+                self,
+                f"layer{layer_index + 1}",
+                make_configured_resnet_layer(self.config, layer_index),
+            )
 
     def forward(self, x):
         x = self.relu(self.bn1(self.conv1(x)))
         x = self.maxpool(x)
-        return self.layer1(x)
+        split_index = RESNET_SPLIT_POINTS.index(self.config["split_after"])
+        for layer_index in range(split_index + 1):
+            x = getattr(self, f"layer{layer_index + 1}")(x)
+        return x
 
 
-class ClientNet(ResNet18ClientNet):
-    def __init__(self):
-        super().__init__(input_channels=1)
-
-
-class CifarClientNet(ResNet18ClientNet):
-    def __init__(self):
-        super().__init__(input_channels=3)
-
-
-class ServerNet(nn.Module):
-    def __init__(self):
+class SplitResNetServerNet(nn.Module):
+    def __init__(self, model_config=None, num_classes=10):
         super().__init__()
-        self.layer2 = make_resnet_layer(64, 128, num_blocks=2, stride=2)
-        self.layer3 = make_resnet_layer(128, 256, num_blocks=2, stride=2)
-        self.layer4 = make_resnet_layer(256, 512, num_blocks=2, stride=2)
+        self.config = normalize_resnet_config(**(model_config or {}))
+        split_index = RESNET_SPLIT_POINTS.index(self.config["split_after"])
+        for layer_index in range(split_index + 1, len(RESNET_SPLIT_POINTS)):
+            setattr(
+                self,
+                f"layer{layer_index + 1}",
+                make_configured_resnet_layer(self.config, layer_index),
+            )
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(512, 10)
+        block_cls = resnet_block_cls(self.config["block"])
+        self.fc = nn.Linear(self.config["widths"][-1] * block_cls.expansion, num_classes)
 
     def forward(self, smashed_data):
-        x = self.layer2(smashed_data)
-        x = self.layer3(x)
-        x = self.layer4(x)
+        x = smashed_data
+        split_index = RESNET_SPLIT_POINTS.index(self.config["split_after"])
+        for layer_index in range(split_index + 1, len(RESNET_SPLIT_POINTS)):
+            x = getattr(self, f"layer{layer_index + 1}")(x)
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
         return self.fc(x)
+
+
+ClientNet = partial(SplitResNetClientNet, input_channels=1)
+CifarClientNet = partial(SplitResNetClientNet, input_channels=3)
+ServerNet = SplitResNetServerNet
 
 
 class FullNet(nn.Module):
@@ -175,11 +410,18 @@ def normalize_dataset_name(dataset_name):
     raise ValueError("--dataset must be one of: mnist, cifar10")
 
 
-def get_model_classes(dataset_name):
+def get_model_classes(dataset_name, model_config=None):
     dataset_name = normalize_dataset_name(dataset_name)
+    normalized_config = normalize_resnet_config(**(model_config or {}))
     if dataset_name == "cifar10":
-        return CifarClientNet, ServerNet
-    return ClientNet, ServerNet
+        return (
+            partial(SplitResNetClientNet, input_channels=3, model_config=normalized_config),
+            partial(SplitResNetServerNet, model_config=normalized_config),
+        )
+    return (
+        partial(SplitResNetClientNet, input_channels=1, model_config=normalized_config),
+        partial(SplitResNetServerNet, model_config=normalized_config),
+    )
 
 
 def load_dataset(dataset_name, train):
@@ -221,12 +463,13 @@ def validate_noniid_alpha(noniid_alpha):
     return alpha
 
 
-def partition_config(num_clients, noniid_alpha, dataset_name="mnist"):
+def partition_config(num_clients, noniid_alpha, dataset_name="mnist", model_config=None):
     return {
         "dataset": normalize_dataset_name(dataset_name),
         "num_clients": int(num_clients),
         "noniid_alpha": validate_noniid_alpha(noniid_alpha),
         "seed": SEED,
+        "model": normalize_resnet_config(**(model_config or {})),
     }
 
 
@@ -384,12 +627,37 @@ def fedavg_state_dicts(state_dicts, sizes):
     return avg_state
 
 
+def quarantine_unreadable_checkpoint(path, error):
+    corrupt_path = path.with_name(path.name + CORRUPT_CHECKPOINT_SUFFIX)
+    counter = 1
+    while corrupt_path.exists():
+        corrupt_path = path.with_name(
+            f"{path.name}{CORRUPT_CHECKPOINT_SUFFIX}.{counter}"
+        )
+        counter += 1
+
+    try:
+        os.replace(path, corrupt_path)
+    except OSError as replace_error:
+        print(
+            "Ignoring unreadable checkpoint and starting from fresh weights: "
+            f"{path} ({error}). Could not move it aside: {replace_error}"
+        )
+        return
+
+    print(
+        "Ignoring unreadable checkpoint and starting from fresh weights: "
+        f"{path} ({error}). Moved to: {corrupt_path}"
+    )
+
+
 def load_split_checkpoint(
     checkpoint_path,
     num_clients,
     device,
     noniid_alpha=1.0,
     dataset_name="mnist",
+    model_config=None,
 ):
     if not checkpoint_path:
         return None, None
@@ -398,7 +666,12 @@ def load_split_checkpoint(
     if not path.exists():
         return None, None
 
-    checkpoint = torch.load(path, map_location=device)
+    try:
+        checkpoint = torch.load(path, map_location=device)
+    except Exception as error:
+        quarantine_unreadable_checkpoint(path, error)
+        return None, None
+
     client_states = checkpoint["client_models"]
     if len(client_states) != num_clients:
         raise ValueError(
@@ -406,7 +679,12 @@ def load_split_checkpoint(
             f"but current run has {num_clients} clients"
         )
 
-    expected_partition = partition_config(num_clients, noniid_alpha, dataset_name)
+    expected_partition = partition_config(
+        num_clients,
+        noniid_alpha,
+        dataset_name,
+        model_config=model_config,
+    )
     saved_partition = checkpoint.get("partition")
     if saved_partition is None:
         print(
@@ -429,6 +707,24 @@ def load_split_checkpoint(
                 f"checkpoint={saved_partition}, current={legacy_expected}"
             )
         print("Loaded legacy MNIST checkpoint without dataset metadata.")
+    elif "model" not in saved_partition:
+        legacy_expected = {
+            key: expected_partition[key]
+            for key in ("dataset", "num_clients", "noniid_alpha", "seed")
+        }
+        saved_without_model = {
+            key: saved_partition[key]
+            for key in ("dataset", "num_clients", "noniid_alpha", "seed")
+        }
+        if saved_without_model != legacy_expected:
+            raise ValueError(
+                "Checkpoint partition config does not match current run: "
+                f"checkpoint={saved_without_model}, current={legacy_expected}"
+            )
+        print(
+            "Loaded checkpoint without model metadata; "
+            "cannot verify ResNet config consistency."
+        )
     elif saved_partition != expected_partition:
         raise ValueError(
             "Checkpoint partition config does not match current run: "
@@ -446,24 +742,37 @@ def save_split_checkpoint(
     num_clients=None,
     noniid_alpha=1.0,
     dataset_name="mnist",
+    model_config=None,
 ):
     if not checkpoint_path:
         return
 
     path = Path(checkpoint_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "client_models": [copy.deepcopy(state) for state in client_states],
-            "server_model": copy.deepcopy(server_model.state_dict()),
-            "partition": (
-                partition_config(num_clients, noniid_alpha, dataset_name)
-                if num_clients is not None
-                else None
-            ),
-        },
-        path,
-    )
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        torch.save(
+            {
+                "client_models": [copy.deepcopy(state) for state in client_states],
+                "server_model": copy.deepcopy(server_model.state_dict()),
+                "partition": (
+                    partition_config(
+                        num_clients,
+                        noniid_alpha,
+                        dataset_name,
+                        model_config=model_config,
+                    )
+                    if num_clients is not None
+                    else None
+                ),
+            },
+            temp_path,
+        )
+        os.replace(temp_path, path)
+    except Exception:
+        if temp_path.exists():
+            temp_path.unlink()
+        raise
     print(f"Saved checkpoint: {path}")
 
 
