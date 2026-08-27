@@ -379,11 +379,6 @@ def make_server_app(
             stats.add_communication(elapsed)
             if round_stats is not None:
                 round_stats.add_communication(elapsed)
-            if stat_label is not None:
-                print(
-                    f"TIMING {stat_label} communication_time={elapsed:.4f}s",
-                    flush=True,
-                )
             return replies
 
         def get_client_states(group_id):
