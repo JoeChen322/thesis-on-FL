@@ -1,5 +1,3 @@
-import math
-import os
 import time
 from typing import Callable, Type
 
@@ -40,21 +38,6 @@ def log_client_trace(
     start_perf=None,
 ):
     now_perf = time.perf_counter()
-    fields = [
-        "CLIENT_TRACE",
-        f"phase={phase}",
-        f"event={event}",
-        f"wall_ts={time.time():.6f}",
-        f"perf_ts={now_perf:.6f}",
-        f"pid={os.getpid()}",
-        f"client_id={client_id}",
-        f"batch_index={batch_index}",
-        f"torch_threads={torch.get_num_threads()}",
-        f"configured_threads={num_threads}",
-    ]
-    if start_perf is not None:
-        fields.append(f"duration_s={now_perf - start_perf:.6f}")
-    print(" ".join(fields), flush=True)
     return now_perf
 
 
@@ -105,6 +88,15 @@ def communication_delay_for_round(delays, round_index):
     if round_index < len(delays):
         return delays[round_index]
     return delays[-1]
+
+
+def train_batch_count(dataset_size, batch_size):
+    full_batches, remainder = divmod(dataset_size, batch_size)
+    if remainder == 1:
+        return full_batches
+    if remainder > 1:
+        return full_batches + 1
+    return full_batches
 
 
 class PatternTogglingManager:
@@ -361,7 +353,7 @@ def make_server_app(
         )
         sizes = [client_size_fn(num_clients, cid) for cid in range(num_clients)]
         num_batches_by_client = [
-            math.ceil(size / batch_size)
+            train_batch_count(size, batch_size)
             for size in sizes
         ]
         if max_batches is not None:
@@ -491,6 +483,17 @@ def make_server_app(
         print(f"Device: {device}")
         print(f"Number of clients: {num_clients}")
         print(f"Client data sizes: {sizes}")
+        skipped_singletons = [
+            client_id
+            for client_id, size in enumerate(sizes)
+            if size % batch_size == 1
+        ]
+        if skipped_singletons:
+            print(
+                "Skipping final singleton training batch for clients: "
+                f"{skipped_singletons}",
+                flush=True,
+            )
         print("Start Flower Message API Split Learning simulation")
         if boundary_switch_enabled:
             scores_by_client = collect_boundary_conditions("boundary-condition")
