@@ -255,7 +255,7 @@ def get_resnet_model_config_from_args(args):
     )
 
 
-def add_resnet_model_args(parser):
+def add_resnet_model_args(parser, default_split_after="layer1"):
     parser.add_argument("--resnet-depth", type=int, default=18)
     parser.add_argument(
         "--resnet-block",
@@ -276,7 +276,7 @@ def add_resnet_model_args(parser):
     parser.add_argument(
         "--resnet-split-after",
         choices=RESNET_SPLIT_POINTS,
-        default="layer1",
+        default=default_split_after,
         help="Split client/server model after this ResNet layer.",
     )
     parser.add_argument("--resnet-stem-kernel", type=int, default=7)

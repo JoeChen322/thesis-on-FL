@@ -71,7 +71,7 @@ def parse_args():
         default=DEFAULT_STRONG_NONIID_JSD_THRESHOLD,
         help="Mean client boundary log2-JSD at or above this value is treated as strong non-IID.",
     )
-    add_resnet_model_args(parser)
+    add_resnet_model_args(parser, default_split_after="layer4")
     return parser.parse_args()
 
 

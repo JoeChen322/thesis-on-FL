@@ -11,6 +11,9 @@ from noniid_jsd_switch import (
 )
 from split_learning_utils import add_resnet_model_args
 
+DEFAULT_RESNET_SPLIT_AFTER = "layer1"
+DEFAULT_SL_RESNET_SPLIT_AFTER = "layer4"
+
 
 def choose_method(args):
     if args.method != "auto":
@@ -135,8 +138,18 @@ def parse_args():
         action="store_true",
         help="Evaluate the full test set after every SL/SFL round.",
     )
-    add_resnet_model_args(parser)
+    add_resnet_model_args(parser, default_split_after=None)
     return parser.parse_args()
+
+
+def resolve_method_default_resnet_split(args, method):
+    if args.resnet_split_after is None:
+        args.resnet_split_after = (
+            DEFAULT_SL_RESNET_SPLIT_AFTER
+            if method == "sl"
+            else DEFAULT_RESNET_SPLIT_AFTER
+        )
+    return args
 
 
 def resolve_python_executable():
@@ -572,6 +585,7 @@ def main():
 
     project_root = Path(__file__).resolve().parent
     method, selection_reason = choose_method(args)
+    args = resolve_method_default_resnet_split(args, method)
     python_executable = resolve_python_executable()
 
     if args.adaptive_communication_switch:
