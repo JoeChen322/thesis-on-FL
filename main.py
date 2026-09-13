@@ -9,10 +9,10 @@ from noniid_jsd_switch import (
     DEFAULT_IID_JSD_THRESHOLD,
     DEFAULT_STRONG_NONIID_JSD_THRESHOLD,
 )
-from split_learning_utils import add_resnet_model_args
+from split_learning_utils import DATASET_CHOICES, add_resnet_model_args
 
 DEFAULT_RESNET_SPLIT_AFTER = "layer1"
-DEFAULT_SL_RESNET_SPLIT_AFTER = "layer4"
+DEFAULT_SL_RESNET_SPLIT_AFTER = "layer2"
 
 
 def choose_method(args):
@@ -34,7 +34,7 @@ def parse_args():
     parser.add_argument("--num-clients", type=int, required=True)
     parser.add_argument("--num-rounds", type=int, default=3)
     parser.add_argument("--method", choices=("auto", "fl", "sl", "sfl"), default="auto")
-    parser.add_argument("--dataset", choices=("mnist", "cifar10"), default="mnist")
+    parser.add_argument("--dataset", choices=DATASET_CHOICES, default="mnist")
     parser.add_argument(
         "--client-cpus",
         default="1",

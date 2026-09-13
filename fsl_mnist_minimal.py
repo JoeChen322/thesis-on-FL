@@ -8,6 +8,7 @@ from noniid_jsd_switch import (
     DEFAULT_STRONG_NONIID_JSD_THRESHOLD,
 )
 from split_learning_utils import (
+    DATASET_CHOICES,
     add_resnet_model_args,
     client_label_boundary_score,
     client_size as message_client_size,
@@ -40,7 +41,7 @@ def parse_args():
     parser.add_argument("--client-num-cpus", type=float, default=1.0)
     parser.add_argument("--client-num-gpus", type=float, default=0.0)
     parser.add_argument("--max-batches", type=int, default=0)
-    parser.add_argument("--dataset", choices=("mnist", "cifar10"), default="mnist")
+    parser.add_argument("--dataset", choices=DATASET_CHOICES, default="mnist")
     parser.add_argument(
         "--communication-delay",
         default="0",

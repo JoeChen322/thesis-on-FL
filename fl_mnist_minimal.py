@@ -17,6 +17,7 @@ from flwr.simulation import run_simulation
 
 from mnist_evaluation import evaluate_model, print_test_metrics
 from split_learning_utils import (
+    DATASET_CHOICES,
     FullNet,
     add_resnet_model_args,
     build_ray_backend_config,
@@ -449,7 +450,7 @@ def parse_args():
     parser.add_argument("--checkpoint-path", default="")
     parser.add_argument("--client-num-cpus", type=float, default=1.0)
     parser.add_argument("--client-num-gpus", type=float, default=0.0)
-    parser.add_argument("--dataset", choices=("mnist", "cifar10"), default="mnist")
+    parser.add_argument("--dataset", choices=DATASET_CHOICES, default="mnist")
     parser.add_argument(
         "--communication-delay",
         default="0",

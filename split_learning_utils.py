@@ -34,6 +34,30 @@ RESNET_DEPTH_PRESETS = {
 RESNET_SPLIT_POINTS = ("layer1", "layer2", "layer3", "layer4")
 DEFAULT_RESNET_WIDTHS = (64, 128, 256, 512)
 CORRUPT_CHECKPOINT_SUFFIX = ".corrupt"
+DATASET_SPECS = {
+    "mnist": {
+        "input_channels": 1,
+        "num_classes": 10,
+        "normalize_mean": (0.1307,),
+        "normalize_std": (0.3081,),
+        "dataset_cls": datasets.MNIST,
+    },
+    "cifar10": {
+        "input_channels": 3,
+        "num_classes": 10,
+        "normalize_mean": (0.4914, 0.4822, 0.4465),
+        "normalize_std": (0.2470, 0.2435, 0.2616),
+        "dataset_cls": datasets.CIFAR10,
+    },
+    "cifar100": {
+        "input_channels": 3,
+        "num_classes": 100,
+        "normalize_mean": (0.5071, 0.4867, 0.4408),
+        "normalize_std": (0.2675, 0.2565, 0.2761),
+        "dataset_cls": datasets.CIFAR100,
+    },
+}
+DATASET_CHOICES = tuple(DATASET_SPECS)
 
 
 def client_num_threads(num_cpus):
@@ -405,22 +429,31 @@ def load_mnist_dataset(train):
 
 def normalize_dataset_name(dataset_name):
     normalized = dataset_name.lower().replace("-", "")
-    if normalized in ("mnist", "cifar10"):
+    if normalized in DATASET_SPECS:
         return normalized
-    raise ValueError("--dataset must be one of: mnist, cifar10")
+    raise ValueError("--dataset must be one of: " + ", ".join(DATASET_CHOICES))
+
+
+def dataset_num_classes(dataset_name):
+    dataset_name = normalize_dataset_name(dataset_name)
+    return DATASET_SPECS[dataset_name]["num_classes"]
 
 
 def get_model_classes(dataset_name, model_config=None):
     dataset_name = normalize_dataset_name(dataset_name)
     normalized_config = normalize_resnet_config(**(model_config or {}))
-    if dataset_name == "cifar10":
-        return (
-            partial(SplitResNetClientNet, input_channels=3, model_config=normalized_config),
-            partial(SplitResNetServerNet, model_config=normalized_config),
-        )
+    dataset_spec = DATASET_SPECS[dataset_name]
     return (
-        partial(SplitResNetClientNet, input_channels=1, model_config=normalized_config),
-        partial(SplitResNetServerNet, model_config=normalized_config),
+        partial(
+            SplitResNetClientNet,
+            input_channels=dataset_spec["input_channels"],
+            model_config=normalized_config,
+        ),
+        partial(
+            SplitResNetServerNet,
+            model_config=normalized_config,
+            num_classes=dataset_spec["num_classes"],
+        ),
     )
 
 
@@ -430,28 +463,20 @@ def load_dataset(dataset_name, train):
     if cache_key in _DATASET_CACHE:
         return _DATASET_CACHE[cache_key]
 
-    if dataset_name == "cifar10":
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2470, 0.2435, 0.2616)),
-        ])
-        dataset = datasets.CIFAR10(
-            root="./data",
-            train=train,
-            download=True,
-            transform=transform,
-        )
-    else:
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            transforms.Normalize((0.1307,), (0.3081,))
-        ])
-        dataset = datasets.MNIST(
-            root="./data",
-            train=train,
-            download=True,
-            transform=transform,
-        )
+    dataset_spec = DATASET_SPECS[dataset_name]
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(
+            dataset_spec["normalize_mean"],
+            dataset_spec["normalize_std"],
+        ),
+    ])
+    dataset = dataset_spec["dataset_cls"](
+        root="./data",
+        train=train,
+        download=True,
+        transform=transform,
+    )
     _DATASET_CACHE[cache_key] = dataset
     return dataset
 
@@ -566,13 +591,16 @@ def client_label_boundary_score(
     client_id,
     num_clients,
     noniid_alpha=1.0,
-    num_classes=10,
+    num_classes=None,
     dataset_name="mnist",
 ):
     dataset = load_dataset(dataset_name, train=True)
     indices = split_indices(dataset, num_clients, noniid_alpha)[client_id]
     if len(indices) == 0:
         return 1.0
+
+    if num_classes is None:
+        num_classes = dataset_num_classes(dataset_name)
 
     targets = np.asarray(dataset.targets)
     labels = targets[np.asarray(indices, dtype=np.int64)]

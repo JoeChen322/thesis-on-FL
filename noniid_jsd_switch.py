@@ -3,7 +3,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from split_learning_utils import load_dataset, split_indices, validate_noniid_alpha
+from split_learning_utils import (
+    DATASET_CHOICES,
+    load_dataset,
+    split_indices,
+    validate_noniid_alpha,
+)
 
 
 # JSD is computed with log2, so pairwise values are in [0, 1].
@@ -212,7 +217,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--num-clients", type=int, required=True)
     parser.add_argument("--noniid-alpha", type=float, default=1.0)
-    parser.add_argument("--dataset", choices=("mnist", "cifar10"), default="mnist")
+    parser.add_argument("--dataset", choices=DATASET_CHOICES, default="mnist")
     parser.add_argument(
         "--iid-jsd-threshold",
         type=float,
