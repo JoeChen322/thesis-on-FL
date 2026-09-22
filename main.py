@@ -33,7 +33,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--num-clients", type=int, required=True)
     parser.add_argument("--num-rounds", type=int, default=3)
-    parser.add_argument("--method", choices=("auto", "fl", "sl", "sfl"), default="auto")
+    parser.add_argument("--method", choices=("auto", "local", "fl", "sl", "sfl"), default="auto")
     parser.add_argument("--dataset", choices=DATASET_CHOICES, default="mnist")
     parser.add_argument(
         "--client-cpus",
@@ -146,7 +146,7 @@ def resolve_method_default_resnet_split(args, method):
     if args.resnet_split_after is None:
         args.resnet_split_after = (
             DEFAULT_SL_RESNET_SPLIT_AFTER
-            if method == "sl"
+            if method in ("local", "sl")
             else DEFAULT_RESNET_SPLIT_AFTER
         )
     return args
@@ -272,6 +272,31 @@ def build_command(
         command.extend(["--noniid-alpha", str(args.noniid_alpha)])
         if communication_delay is not None:
             command.extend(["--communication-delay", str(communication_delay)])
+        extend_resnet_command_args(command, args)
+        return command
+
+    if method == "local":
+        command = [
+            python_executable,
+            str(project_root / "local_resnet_baseline.py"),
+            "--num-clients",
+            str(args.num_clients),
+            "--num-rounds",
+            str(num_rounds),
+            "--client-num-cpus",
+            str(client_num_cpus),
+            "--local-epochs",
+            str(args.local_epochs),
+            "--dataset",
+            args.dataset,
+        ]
+        if checkpoint_path is not None:
+            command.extend(["--checkpoint-path", str(checkpoint_path)])
+        command.extend(["--noniid-alpha", str(args.noniid_alpha)])
+        if args.max_batches:
+            command.extend(["--max-batches", str(args.max_batches)])
+        if args.eval_every_round:
+            command.append("--eval-every-round")
         extend_resnet_command_args(command, args)
         return command
 

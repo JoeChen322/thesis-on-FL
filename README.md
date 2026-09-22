@@ -129,6 +129,34 @@
 python .\main.py --method sl --num-clients 2 --client-cpus 1,1 --num-rounds 3 --adaptive-communication-switch --communication-delay 0,8,5 
 ```
 
+## ResNet18 Local Baseline and Four-Paradigm Leakage Comparison
+
+Run a local single-client ResNet18 baseline on CPU:
+
+```bash
+python .\main.py --method local --num-clients 1 --client-cpus 1 --num-rounds 5 --dataset mnist --resnet-depth 18 --resnet-split-after layer2
+```
+
+Run isolated local, FL, SL, and SFL experiments with one client, one CPU, and
+five rounds, then measure cut-layer leakage for all four checkpoints:
+
+```bash
+python .\run_resnet18_paradigm_comparison.py --dataset mnist --num-clients 1 --client-cpus 1 --num-rounds 5 --resnet-split-after layer2
+```
+
+The comparison script writes separate checkpoints under `.\.checkpoints` and
+exports the leakage table to:
+
+```text
+.\.checkpoints\resnet18_1client_1cpu_5rounds_leakage.csv
+```
+
+You can also compare existing checkpoints directly:
+
+```bash
+python .\measure_cutlayer_leakage.py --dataset cifar10 --num-clients 1 --noniid-alpha 0.1 --expected-split-after layer2 --checkpoint local=.\.checkpoints\local_cifar10_1clients_1cpu_5rounds_alpha0p1_resnet18_splitlayer2_checkpoint.pt --checkpoint fl=.\.checkpoints\fl_cifar10_1clients_1cpu_5rounds_alpha0p1_resnet18_splitlayer2_checkpoint.pt --checkpoint sl=.\.checkpoints\sl_cifar10_1clients_1cpu_5rounds_alpha0p1_resnet18_splitlayer2_checkpoint.pt --checkpoint sfl=.\.checkpoints\sfl_cifar10_1clients_1cpu_5rounds_alpha0p1_resnet18_splitlayer2_checkpoint.pt --csv-path .\.checkpoints\resnet18_leakage_compare.csv
+```
+
 ## Docker
 
 Build the image:
