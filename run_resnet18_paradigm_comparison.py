@@ -18,6 +18,8 @@ PARADIGM_SCRIPTS = {
 
 
 DEFAULT_PARADIGMS = ("fl", "sl", "sfl")
+DEFAULT_NONIID_ALPHAS = "0.1,0.5,0.9"
+DEFAULT_RESNET_SPLIT_AFTERS = ",".join(RESNET_SPLIT_POINTS)
 
 
 def checkpoint_label_value(value):
@@ -256,8 +258,11 @@ def parse_args():
     parser.add_argument("--noniid-alpha", type=float, default=1.0)
     parser.add_argument(
         "--noniid-alphas",
-        default="",
-        help="Comma-separated non-IID alpha grid. Defaults to --noniid-alpha.",
+        default=DEFAULT_NONIID_ALPHAS,
+        help=(
+            "Comma-separated non-IID alpha grid. "
+            f"Default: {DEFAULT_NONIID_ALPHAS}."
+        ),
     )
     parser.add_argument(
         "--resnet-split-after",
@@ -266,8 +271,11 @@ def parse_args():
     )
     parser.add_argument(
         "--resnet-split-afters",
-        default="",
-        help="Comma-separated split-point grid. Defaults to --resnet-split-after.",
+        default=DEFAULT_RESNET_SPLIT_AFTERS,
+        help=(
+            "Comma-separated split-point grid. "
+            f"Default: {DEFAULT_RESNET_SPLIT_AFTERS}."
+        ),
     )
     parser.add_argument(
         "--paradigms",
