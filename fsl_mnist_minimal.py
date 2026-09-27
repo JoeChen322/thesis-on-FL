@@ -44,8 +44,8 @@ def parse_args():
     parser.add_argument(
         "--gradient-clip-norm",
         type=float,
-        default=5.0,
-        help="Clip client/server gradient norm in FSL. Use 0 to disable clipping.",
+        default=0.0,
+        help="Clip client/server gradient norm in FSL. 0 disables clipping.",
     )
     parser.add_argument("--dataset", choices=DATASET_CHOICES, default="mnist")
     parser.add_argument(

@@ -489,7 +489,17 @@ def make_server_app(
             else:
                 print_metrics_fn(metric_label, avg_loss, avg_accuracy)
 
-        if initial_client_states is not None:
+        if initial_client_states is None:
+            # Without a checkpoint, every client would otherwise build its own randomly
+            # initialised client-side model in its own process. Averaging independently
+            # initialised networks in SFL destroys them, so all clients start from one
+            # common initialisation created here, as in FL.
+            common_client_state = client_model_cls().to(device).state_dict()
+            start_client_states = [common_client_state for _ in range(num_clients)]
+        else:
+            start_client_states = initial_client_states
+
+        if start_client_states is not None:
             load_msgs = [
                 grid.create_message(
                     RecordDict({
@@ -499,7 +509,7 @@ def make_server_app(
                     dst_node_id=node_id,
                     group_id="load-client-params",
                 )
-                for node_id, client_state in zip(node_ids, initial_client_states)
+                for node_id, client_state in zip(node_ids, start_client_states)
             ]
             list(grid.send_and_receive(load_msgs))
 
@@ -541,6 +551,9 @@ def make_server_app(
 
         for round_idx in range(1, num_rounds + 1):
             round_stats = RuntimeStats()
+            # evaluate_fn switches the server model to eval(); switch it back before
+            # the next training round.
+            server_model.train()
             total_loss = 0.0
             total_correct = 0
             total_examples = 0
@@ -733,7 +746,7 @@ def run_message_simulation(
     print_metrics_fn: Callable | None = None,
     max_batches: int | None = None,
     eval_every_round: bool = False,
-    gradient_clip_norm: float = 5.0,
+    gradient_clip_norm: float = 0.0,
     boundary_condition_fn: Callable | None = None,
     boundary_switch_enabled: bool = False,
     iid_jsd_threshold: float = DEFAULT_IID_JSD_THRESHOLD,
