@@ -90,6 +90,25 @@ def communication_delay_for_round(delays, round_index):
     return delays[-1]
 
 
+def assert_finite_tensor(value, label):
+    if not torch.isfinite(value).all():
+        raise FloatingPointError(f"Non-finite tensor detected: {label}")
+
+
+def assert_finite_model(model, label):
+    for name, value in model.state_dict().items():
+        if torch.is_floating_point(value) and not torch.isfinite(value).all():
+            raise FloatingPointError(f"Non-finite model tensor detected: {label}.{name}")
+
+
+def clip_gradients(parameters, max_norm):
+    if max_norm is None or max_norm <= 0:
+        return
+    grad_norm = torch.nn.utils.clip_grad_norm_(parameters, max_norm)
+    if not torch.isfinite(grad_norm):
+        raise FloatingPointError(f"Non-finite gradient norm detected: {grad_norm}")
+
+
 def train_batch_count(dataset_size, batch_size):
     full_batches, remainder = divmod(dataset_size, batch_size)
     if remainder == 1:
@@ -221,6 +240,7 @@ def make_client_app(
         batch_index = int(config["batch_index"])
         batch_size = int(config["batch_size"])
         lr_client = float(config["lr_client"])
+        gradient_clip_norm = float(config.get("gradient_clip_norm", 0.0))
         start_perf = log_client_trace(
             "backward",
             "START",
@@ -243,7 +263,9 @@ def make_client_app(
         optimizer.zero_grad()
         activation = client_model(x)
         activation.backward(grad)
+        clip_gradients(client_model.parameters(), gradient_clip_norm)
         optimizer.step()
+        assert_finite_model(client_model, f"client{client_id}")
         context.state["client_model"] = model_to_record(client_model)
 
         duration_s = time.perf_counter() - start_perf
@@ -323,6 +345,7 @@ def make_server_app(
     use_client_fedavg: bool,
     max_batches: int | None,
     eval_every_round: bool,
+    gradient_clip_norm: float,
     boundary_switch_enabled: bool,
     iid_jsd_threshold: float,
     strong_noniid_jsd_threshold: float,
@@ -584,10 +607,15 @@ def make_server_app(
                         train_start_perf = time.perf_counter()
                         server_optimizer.zero_grad()
                         outputs = server_model(activation)
+                        assert_finite_tensor(outputs, "server outputs")
                         #compute the loss
                         loss = criterion(outputs, labels)
+                        assert_finite_tensor(loss, "server loss")
                         loss.backward()
+                        assert_finite_tensor(activation.grad, "activation gradient")
+                        clip_gradients(server_model.parameters(), gradient_clip_norm)
                         server_optimizer.step()
+                        assert_finite_model(server_model, "server")
                         train_elapsed = time.perf_counter() - train_start_perf
                         stats.add_training(train_elapsed)
                         round_stats.add_training(train_elapsed)
@@ -599,6 +627,7 @@ def make_server_app(
                             "batch_index": batch_index,
                             "batch_size": batch_size,
                             "lr_client": lr_client,
+                            "gradient_clip_norm": gradient_clip_norm,
                         })
                         backward_msgs.append(
                             grid.create_message(
@@ -641,6 +670,11 @@ def make_server_app(
                 fedavg_start_perf = time.perf_counter()
                 #get the average value
                 avg_state = fedavg_fn(client_states, sizes)
+                for key, value in avg_state.items():
+                    if torch.is_floating_point(value) and not torch.isfinite(value).all():
+                        raise FloatingPointError(
+                            f"SFL client-side FedAvg produced non-finite values for {key}"
+                        )
                 #switch the dict form into message form
                 avg_record = ArrayRecord.from_torch_state_dict(avg_state)
                 fedavg_elapsed = time.perf_counter() - fedavg_start_perf
@@ -699,6 +733,7 @@ def run_message_simulation(
     print_metrics_fn: Callable | None = None,
     max_batches: int | None = None,
     eval_every_round: bool = False,
+    gradient_clip_norm: float = 5.0,
     boundary_condition_fn: Callable | None = None,
     boundary_switch_enabled: bool = False,
     iid_jsd_threshold: float = DEFAULT_IID_JSD_THRESHOLD,
@@ -734,6 +769,7 @@ def run_message_simulation(
         use_client_fedavg=use_client_fedavg,
         max_batches=max_batches,
         eval_every_round=eval_every_round,
+        gradient_clip_norm=gradient_clip_norm,
         boundary_switch_enabled=boundary_switch_enabled,
         iid_jsd_threshold=iid_jsd_threshold,
         strong_noniid_jsd_threshold=strong_noniid_jsd_threshold,

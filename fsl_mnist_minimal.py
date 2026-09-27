@@ -41,6 +41,12 @@ def parse_args():
     parser.add_argument("--client-num-cpus", type=float, default=1.0)
     parser.add_argument("--client-num-gpus", type=float, default=0.0)
     parser.add_argument("--max-batches", type=int, default=0)
+    parser.add_argument(
+        "--gradient-clip-norm",
+        type=float,
+        default=5.0,
+        help="Clip client/server gradient norm in FSL. Use 0 to disable clipping.",
+    )
     parser.add_argument("--dataset", choices=DATASET_CHOICES, default="mnist")
     parser.add_argument(
         "--communication-delay",
@@ -150,6 +156,7 @@ def main():
         evaluate_fn=evaluate_split_model_for_dataset,
         print_metrics_fn=print_test_metrics,
         max_batches=args.max_batches or None,
+        gradient_clip_norm=args.gradient_clip_norm,
         eval_every_round=args.eval_every_round,
         boundary_condition_fn=boundary_condition_with_alpha,
         boundary_switch_enabled=args.boundary_noniid_switch,

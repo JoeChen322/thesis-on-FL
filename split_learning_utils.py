@@ -647,12 +647,35 @@ def fedavg_state_dicts(state_dicts, sizes):
     avg_state = OrderedDict()
 
     for key in state_dicts[0].keys():
+        first_value = state_dicts[0][key]
+        if not torch.is_floating_point(first_value):
+            avg_state[key] = first_value.clone()
+            continue
+
         avg_state[key] = sum(
             state_dicts[idx][key] * (sizes[idx] / total_size)
             for idx in range(len(state_dicts))
         )
+        if not torch.isfinite(avg_state[key]).all():
+            raise FloatingPointError(f"FedAvg produced non-finite values for {key}")
 
     return avg_state
+
+
+def nonfinite_state_tensors(state_dict, label):
+    bad_keys = []
+    for key, value in state_dict.items():
+        if torch.is_floating_point(value) and not torch.isfinite(value).all():
+            bad_keys.append(f"{label}.{key}")
+    return bad_keys
+
+
+def checkpoint_nonfinite_tensors(client_states, server_state):
+    bad_keys = []
+    for client_id, client_state in enumerate(client_states):
+        bad_keys.extend(nonfinite_state_tensors(client_state, f"client{client_id}"))
+    bad_keys.extend(nonfinite_state_tensors(server_state, "server"))
+    return bad_keys
 
 
 def quarantine_unreadable_checkpoint(path, error):
@@ -758,6 +781,16 @@ def load_split_checkpoint(
             "Checkpoint partition config does not match current run: "
             f"checkpoint={saved_partition}, current={expected_partition}"
         )
+
+    bad_keys = checkpoint_nonfinite_tensors(client_states, checkpoint["server_model"])
+    if bad_keys:
+        quarantine_unreadable_checkpoint(
+            path,
+            "checkpoint contains non-finite tensor values: "
+            + ", ".join(bad_keys[:10])
+            + (" ..." if len(bad_keys) > 10 else ""),
+        )
+        return None, None
 
     print(f"Loaded checkpoint: {path}")
     return client_states, checkpoint["server_model"]
