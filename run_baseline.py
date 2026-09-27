@@ -54,7 +54,7 @@ ROUNDS = [5, 10]                 # every run trains max(ROUNDS) rounds, evaluate
 NETWORK = {
     "stable": "0",
 }
-REPEATS = 3                      # repetitions of each executed run, to measure timing noise
+REPEATS = 1                      # repetitions of each executed run, to measure timing noise
 SPLIT_AFTER = "layer2"           # same cut layer for SL and SFL, so they differ only in aggregation
 LOCAL_EPOCHS = 1
 MAX_BATCHES = 0                  # SL/SFL only; 0 = full local dataset
