@@ -8,15 +8,15 @@ Usage
   python run_baseline.py parse logs/<run>.log # test the log parser on one existing log
   python run_baseline.py summarize            # build the CSV tables used in Chapter 4
 
-Everything the script produces goes to ./baseline_results/:
-  runs.jsonl          one JSON record per executed run (config, command, status, parsed metrics)
-  logs/<run_id>.log   full stdout/stderr of every run (re-parse at any time, nothing is lost)
-  runs.csv            one row per run (final metrics)
-  rounds.csv          one row per run and round (per-round metrics)
-  baseline_table.csv  one row per *logical* configuration of Table 4.1
-                      (rounds and network condition derived as described in Section 4.1),
-                      averaged over repeats (mean and std)
-  best_paradigm.csv   preferred paradigm P*(c) per configuration (Section 4.1.4)
+Everything the script produces goes to ./baseline_results_cifar10/ by default:
+  runs.jsonl                 one JSON record per executed run
+  logs/<run_id>.log          full stdout/stderr of every staged run
+  checkpoints/<run_id>_round010.pt
+                             retained model checkpoint at the final reported round cut
+  runs.csv                   one row per run (final metrics)
+  rounds.csv                 one row per run and round (per-round metrics)
+  baseline_table.csv         one row per logical configuration
+  best_paradigm.csv          preferred paradigm P*(c) per configuration
 
 Adjust the GRID and the command-building section below to match your code.
 Places that must be checked against your code are marked with  # CHECK
@@ -30,6 +30,7 @@ import os
 import platform
 import random
 import re
+import shutil
 import statistics
 import subprocess
 import sys
@@ -43,14 +44,14 @@ from pathlib import Path
 GRID = {
     "paradigm":    ["fl", "sl", "sfl"],
     "model":       ["resnet18"],
-    "dataset":     ["mnist"],                     # CHECK: must match DATASET_CHOICES
+    "dataset":     ["cifar10"],                   # CHECK: must match DATASET_CHOICES
     "num_clients": [3, 5, 10],
     "cpus":        [1],
     "alpha":       [0.1, 0.5, 0.9, 1.0],          # 1.0 = IID in your code
 }
 
 # Logical factors that are derived instead of executed (Section 4.1, "Experimental grid").
-ROUNDS = [5, 10]                 # every run trains max(ROUNDS) rounds, evaluated after each round
+ROUNDS = [5, 10]                 # checkpoints are retained at each listed round
 NETWORK = {
     "stable": "0",
 }
@@ -72,14 +73,15 @@ MODEL_ARGS = {
 }
 SPLIT_ARG = "--resnet-split-after"
 
-OUT = Path("baseline_results")
+OUT = Path("baseline_results_cifar10")
+CHECKPOINTS_DIRNAME = "checkpoints"
 
 
 # =====================================================================
 # 2. Command construction
 # =====================================================================
-def build_command(cfg, python=sys.executable):
-    n_rounds = max(ROUNDS)
+def build_command(cfg, python=sys.executable, num_rounds=None, checkpoint_path=None):
+    n_rounds = max(ROUNDS) if num_rounds is None else num_rounds
     cmd = [python, SCRIPTS[cfg["paradigm"]],
            "--num-clients", str(cfg["num_clients"]),
            "--num-rounds", str(n_rounds),
@@ -90,6 +92,8 @@ def build_command(cfg, python=sys.executable):
            "--communication-delay", "0",
            *MODEL_ARGS[cfg["model"]],
            SPLIT_ARG, SPLIT_AFTER]
+    if checkpoint_path is not None:
+        cmd += ["--checkpoint-path", str(checkpoint_path)]
     if cfg["paradigm"] in ("sl", "sfl"):
         cmd += ["--eval-every-round"]
         if MAX_BATCHES:
@@ -111,10 +115,16 @@ def run_id(cfg):
     return base
 
 
+def checkpoint_path_for(rid, round_count):
+    checkpoints = OUT / CHECKPOINTS_DIRNAME
+    return checkpoints / f"{rid}_round{round_count:03d}.pt"
+
+
 # =====================================================================
 # 3. Log parsing
 # =====================================================================
 RE_ROUND = re.compile(r"\bRound\s+(\d+)\b", re.I)
+RE_STAGE_MARKER = re.compile(r"^# Stage to global round\s+(\d+):.*$", re.I | re.M)
 RE_LOSS = re.compile(r"test\s+loss\s*[:=]\s*([-+\d.eE]+)", re.I)
 RE_ACC = re.compile(r"test\s+acc(?:uracy)?\s*[:=]\s*([-+\d.eE]+)\s*(%?)", re.I)
 RE_STATS = re.compile(r"(Round\s+(\d+)|Total)\s+runtime stats:\s*(.*)", re.I)
@@ -132,6 +142,21 @@ def parse_log(text):
       Final test loss / Final test acc
       Total runtime stats: ...
     """
+    stage_matches = list(RE_STAGE_MARKER.finditer(text))
+    if stage_matches:
+        stages = []
+        completed = 0
+        for index, match in enumerate(stage_matches):
+            target_round = int(match.group(1))
+            start = match.end()
+            end = stage_matches[index + 1].start() if index + 1 < len(stage_matches) else len(text)
+            stages.append({
+                "rounds": target_round - completed,
+                "parsed": parse_log(text[start:end]),
+            })
+            completed = target_round
+        return combine_stage_metrics(stages)
+
     rounds, final, total_stats = {}, {}, {}
     current = None
     for line in text.splitlines():
@@ -190,9 +215,116 @@ def env_info(code_dir):
     return info
 
 
+def combine_stage_metrics(stages):
+    rounds, total_stats = [], {}
+    final = {}
+    completed = 0
+    for stage in stages:
+        parsed = stage["parsed"]
+        for row in parsed["rounds"]:
+            local_round = row.get("round")
+            if local_round is None:
+                continue
+            shifted = dict(row)
+            shifted["round"] = completed + local_round
+            rounds.append(shifted)
+        for key, value in parsed["total"].items():
+            total_stats[key] = total_stats.get(key, 0.0) + value
+        if parsed["final"]:
+            final = parsed["final"]
+        completed += stage["rounds"]
+    return {
+        "rounds": sorted(rounds, key=lambda row: row["round"]),
+        "final": final,
+        "total": total_stats,
+    }
+
+
+def run_staged_command(cfg, rid, args, code_dir, log_path):
+    checkpoint_path = (OUT / CHECKPOINTS_DIRNAME / f".{rid}_{os.getpid()}_working.pt")
+    stages, commands = [], []
+    completed_rounds = 0
+    retained_round = max(ROUNDS)
+    status, rc = "ok", None
+
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(log_path, "w") as log:
+            for target_round in sorted(ROUNDS):
+                stage_rounds = target_round - completed_rounds
+                if stage_rounds <= 0:
+                    continue
+
+                cmd = build_command(
+                    cfg,
+                    python=args.python,
+                    num_rounds=stage_rounds,
+                    checkpoint_path=checkpoint_path,
+                )
+                commands.append(cmd)
+                log.write(
+                    f"# Stage to global round {target_round}: "
+                    + " ".join(str(part) for part in cmd)
+                    + "\n"
+                )
+                log.flush()
+
+                stage_start = time.perf_counter()
+                try:
+                    proc = subprocess.run(
+                        cmd,
+                        cwd=code_dir,
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                        timeout=TIMEOUT_S,
+                        text=True,
+                    )
+                    rc = proc.returncode
+                    if rc != 0:
+                        status = "failed"
+                except subprocess.TimeoutExpired:
+                    status = "timeout"
+
+                stage_wall = time.perf_counter() - stage_start
+                log.flush()
+
+                stage_text = log_path.read_text(errors="replace").split(
+                    f"# Stage to global round {target_round}: ",
+                    1,
+                )[-1]
+                parsed = parse_log(stage_text)
+                stages.append({
+                    "target_round": target_round,
+                    "rounds": stage_rounds,
+                    "wall_clock_s": round(stage_wall, 3),
+                    "parsed": parsed,
+                })
+
+                if (
+                    status == "ok"
+                    and target_round == retained_round
+                    and checkpoint_path.exists()
+                ):
+                    shutil.copy2(checkpoint_path, checkpoint_path_for(rid, target_round))
+
+                if status != "ok":
+                    break
+                if not parsed["final"]:
+                    status = "no_metrics"
+                    break
+
+                completed_rounds = target_round
+    finally:
+        if checkpoint_path.exists():
+            checkpoint_path.unlink()
+
+    return status, rc, commands, combine_stage_metrics(stages)
+
+
 def cmd_run(args):
     code_dir = Path(args.code_dir).resolve()
     (OUT / "logs").mkdir(parents=True, exist_ok=True)
+    (OUT / CHECKPOINTS_DIRNAME).mkdir(parents=True, exist_ok=True)
     done = load_done()
     todo = [c for c in all_configs()
             if (not args.only_paradigm or c["paradigm"] == args.only_paradigm)
@@ -209,27 +341,17 @@ def cmd_run(args):
 
     for i, cfg in enumerate(todo, 1):
         rid = run_id(cfg)
-        cmd = build_command(cfg, python=args.python)
         log_path = OUT / "logs" / f"{rid}.log"
         print(f"[{i}/{len(todo)}] {rid}", flush=True)
         start = time.perf_counter()
-        status, rc = "ok", None
-        with open(log_path, "w") as log:
-            log.write("# " + " ".join(cmd) + "\n")
-            log.flush()
-            try:
-                proc = subprocess.run(cmd, cwd=code_dir, stdout=log, stderr=subprocess.STDOUT,
-                                      timeout=TIMEOUT_S, text=True)
-                rc = proc.returncode
-                if rc != 0:
-                    status = "failed"
-            except subprocess.TimeoutExpired:
-                status = "timeout"
         wall = time.perf_counter() - start
-        parsed = parse_log(log_path.read_text(errors="replace"))
+        status, rc, commands, parsed = run_staged_command(cfg, rid, args, code_dir, log_path)
+        wall = time.perf_counter() - start
         if status == "ok" and not parsed["final"]:
             status = "no_metrics"          # finished but the parser found nothing: check the log
-        rec = {"run_id": rid, "config": cfg, "command": cmd, "status": status,
+        checkpoint_paths = {str(max(ROUNDS)): str(checkpoint_path_for(rid, max(ROUNDS)))}
+        rec = {"run_id": rid, "config": cfg, "command": commands, "status": status,
+               "checkpoint_paths": checkpoint_paths,
                "returncode": rc, "wall_clock_s": round(wall, 3),
                "finished_at": datetime.now().isoformat(timespec="seconds"),
                "env": info, **parsed}
@@ -249,12 +371,22 @@ def cmd_plan(_args):
     print("Grid:")
     for k, v in GRID.items():
         print(f"  {k:12s} {v}")
-    print(f"  {'rounds':12s} {ROUNDS} (derived from one {max(ROUNDS)}-round run)")
+    print(f"  {'rounds':12s} {ROUNDS} (only round {max(ROUNDS)} checkpoint is retained)")
     print(f"  {'network':12s} {list(NETWORK)} (reported network conditions)")
     print(f"\nLogical configurations : {logical}")
-    print(f"Executed configurations: {executed}  x {REPEATS} repeats = {executed * REPEATS} runs")
+    print(f"Executed configurations: {executed}  x {REPEATS} repeats = {executed * REPEATS} staged runs")
     example = next(all_configs())
-    print("\nExample command:\n  " + " ".join(build_command(example)))
+    example_checkpoint = OUT / CHECKPOINTS_DIRNAME / f".{run_id(example)}_<pid>_working.pt"
+    print(
+        "\nExample first-stage command:\n  "
+        + " ".join(
+            build_command(
+                example,
+                num_rounds=ROUNDS[0],
+                checkpoint_path=example_checkpoint,
+            )
+        )
+    )
 
 
 def cmd_parse(args):
