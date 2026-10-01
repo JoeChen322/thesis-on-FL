@@ -179,6 +179,9 @@ def checkpoint_label_value(value):
 
 
 def model_checkpoint_label(args):
+    if args.model == "cnn":
+        return f"cnn_split{args.cnn_split_after}"
+
     parts = [f"resnet{args.resnet_depth}"]
     if args.resnet_block:
         parts.append(args.resnet_block)
@@ -196,6 +199,11 @@ def model_checkpoint_label(args):
 
 
 def extend_resnet_command_args(command, args):
+    command.extend(["--model", args.model])
+    if args.model == "cnn":
+        command.extend(["--cnn-split-after", args.cnn_split_after])
+        return command
+
     command.extend(["--resnet-depth", str(args.resnet_depth)])
     if args.resnet_block:
         command.extend(["--resnet-block", args.resnet_block])

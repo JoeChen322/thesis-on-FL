@@ -33,6 +33,7 @@ RESNET_DEPTH_PRESETS = {
 }
 RESNET_SPLIT_POINTS = ("layer1", "layer2", "layer3", "layer4")
 DEFAULT_RESNET_WIDTHS = (64, 128, 256, 512)
+CNN_SPLIT_POINTS = ("conv1", "conv2")
 CORRUPT_CHECKPOINT_SUFFIX = ".corrupt"
 DATASET_SPECS = {
     "mnist": {
@@ -267,7 +268,36 @@ def normalize_resnet_config(
     }
 
 
+def normalize_cnn_config(cnn_split_after="conv1", architecture=None, split_after=None):
+    if architecture is not None and architecture != "split_cnn":
+        raise ValueError(f"Unsupported model architecture: {architecture}")
+    if split_after is not None:
+        cnn_split_after = split_after
+
+    split_after = cnn_split_after.lower()
+    if split_after not in CNN_SPLIT_POINTS:
+        raise ValueError(
+            "--cnn-split-after must be one of: "
+            + ", ".join(CNN_SPLIT_POINTS)
+        )
+
+    return {
+        "architecture": "split_cnn",
+        "split_after": split_after,
+    }
+
+
+def normalize_model_config(model_config=None):
+    model_config = model_config or {}
+    architecture = model_config.get("architecture", "split_resnet")
+    if architecture == "split_cnn":
+        return normalize_cnn_config(**model_config)
+    return normalize_resnet_config(**model_config)
+
+
 def get_resnet_model_config_from_args(args):
+    if getattr(args, "model", "resnet") == "cnn":
+        return normalize_cnn_config(cnn_split_after=args.cnn_split_after)
     return normalize_resnet_config(
         resnet_depth=args.resnet_depth,
         resnet_block=args.resnet_block,
@@ -280,6 +310,7 @@ def get_resnet_model_config_from_args(args):
 
 
 def add_resnet_model_args(parser, default_split_after="layer1"):
+    parser.add_argument("--model", choices=("resnet", "cnn"), default="resnet")
     parser.add_argument("--resnet-depth", type=int, default=18)
     parser.add_argument(
         "--resnet-block",
@@ -305,6 +336,12 @@ def add_resnet_model_args(parser, default_split_after="layer1"):
     )
     parser.add_argument("--resnet-stem-kernel", type=int, default=7)
     parser.add_argument("--resnet-stem-stride", type=int, default=2)
+    parser.add_argument(
+        "--cnn-split-after",
+        choices=CNN_SPLIT_POINTS,
+        default="conv1",
+        help="Split client/server model after this CNN block.",
+    )
     return parser
 
 
@@ -402,6 +439,53 @@ class SplitResNetServerNet(nn.Module):
         return self.fc(x)
 
 
+class SplitCNNClientNet(nn.Module):
+    def __init__(self, input_channels, model_config=None):
+        super().__init__()
+        self.config = normalize_cnn_config(**(model_config or {}))
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(input_channels, 32, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+        )
+
+    def forward(self, x):
+        x = self.conv1(x)
+        if self.config["split_after"] == "conv2":
+            x = self.conv2(x)
+        return x
+
+
+class SplitCNNServerNet(nn.Module):
+    def __init__(self, model_config=None, num_classes=10):
+        super().__init__()
+        self.config = normalize_cnn_config(**(model_config or {}))
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+        )
+        self.pool = nn.AdaptiveAvgPool2d((4, 4))
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(64 * 4 * 4, 128),
+            nn.ReLU(inplace=True),
+            nn.Linear(128, num_classes),
+        )
+
+    def forward(self, smashed_data):
+        x = smashed_data
+        if self.config["split_after"] == "conv1":
+            x = self.conv2(x)
+        x = self.pool(x)
+        return self.classifier(x)
+
+
 ClientNet = partial(SplitResNetClientNet, input_channels=1)
 CifarClientNet = partial(SplitResNetClientNet, input_channels=3)
 ServerNet = SplitResNetServerNet
@@ -441,8 +525,21 @@ def dataset_num_classes(dataset_name):
 
 def get_model_classes(dataset_name, model_config=None):
     dataset_name = normalize_dataset_name(dataset_name)
-    normalized_config = normalize_resnet_config(**(model_config or {}))
+    normalized_config = normalize_model_config(model_config)
     dataset_spec = DATASET_SPECS[dataset_name]
+    if normalized_config["architecture"] == "split_cnn":
+        return (
+            partial(
+                SplitCNNClientNet,
+                input_channels=dataset_spec["input_channels"],
+                model_config=normalized_config,
+            ),
+            partial(
+                SplitCNNServerNet,
+                model_config=normalized_config,
+                num_classes=dataset_spec["num_classes"],
+            ),
+        )
     return (
         partial(
             SplitResNetClientNet,
@@ -494,7 +591,7 @@ def partition_config(num_clients, noniid_alpha, dataset_name="mnist", model_conf
         "num_clients": int(num_clients),
         "noniid_alpha": validate_noniid_alpha(noniid_alpha),
         "seed": SEED,
-        "model": normalize_resnet_config(**(model_config or {})),
+        "model": normalize_model_config(model_config),
     }
 
 

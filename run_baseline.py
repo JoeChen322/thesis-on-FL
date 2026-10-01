@@ -4,11 +4,12 @@ Usage
 -----
   python run_baseline.py plan                 # show the grid and how many runs it needs
   python run_baseline.py run                  # run everything (resumable: finished runs are skipped)
+  python run_baseline.py run --max-workers 2  # run local experiments in parallel
   python run_baseline.py run --only-paradigm fl --limit 3      # partial runs, e.g. for a smoke test
   python run_baseline.py parse logs/<run>.log # test the log parser on one existing log
   python run_baseline.py summarize            # build the CSV tables used in Chapter 4
 
-Everything the script produces goes to ./baseline_results_cifar10/ by default:
+Everything the script produces goes to ./baseline_results_mnist_cnn/ by default:
   runs.jsonl                 one JSON record per executed run
   logs/<run_id>.log          full stdout/stderr of every staged run
   checkpoints/<run_id>_round010.pt
@@ -23,6 +24,7 @@ Places that must be checked against your code are marked with  # CHECK
 """
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import itertools
 import json
@@ -43,8 +45,8 @@ from pathlib import Path
 # =====================================================================
 GRID = {
     "paradigm":    ["fl", "sl", "sfl"],
-    "model":       ["resnet18"],
-    "dataset":     ["cifar10"],                   # CHECK: must match DATASET_CHOICES
+    "model":       ["cnn"],
+    "dataset":     ["mnist"],                     # CHECK: must match DATASET_CHOICES
     "num_clients": [3, 5, 10],
     "cpus":        [1],
     "alpha":       [0.1, 0.5, 0.9, 1.0],          # 1.0 = IID in your code
@@ -68,12 +70,12 @@ SCRIPTS = {"fl": "fl_mnist_minimal.py", "sl": "sl_mnist_minimal.py", "sfl": "fsl
 # How each model name is passed on the command line.
 # CHECK: use the flag names defined in add_resnet_model_args() in split_learning_utils.py
 MODEL_ARGS = {
-    "resnet18": ["--resnet-depth", "18"],
-    "resnet34": ["--resnet-depth", "34"],
+    "cnn": ["--model", "cnn", "--cnn-split-after", "conv1"],
+    "resnet18": ["--model", "resnet", "--resnet-depth", "18"],
+    "resnet34": ["--model", "resnet", "--resnet-depth", "34"],
 }
-SPLIT_ARG = "--resnet-split-after"
 
-OUT = Path("baseline_results_cifar10")
+OUT = Path("baseline_results_mnist_cnn")
 CHECKPOINTS_DIRNAME = "checkpoints"
 
 
@@ -90,8 +92,9 @@ def build_command(cfg, python=sys.executable, num_rounds=None, checkpoint_path=N
            "--dataset", cfg["dataset"],
            "--noniid-alpha", str(cfg["alpha"]),
            "--communication-delay", "0",
-           *MODEL_ARGS[cfg["model"]],
-           SPLIT_ARG, SPLIT_AFTER]
+           *MODEL_ARGS[cfg["model"]]]
+    if cfg["model"].startswith("resnet"):
+        cmd += ["--resnet-split-after", SPLIT_AFTER]
     if checkpoint_path is not None:
         cmd += ["--checkpoint-path", str(checkpoint_path)]
     if cfg["paradigm"] in ("sl", "sfl"):
@@ -321,6 +324,23 @@ def run_staged_command(cfg, rid, args, code_dir, log_path):
     return status, rc, commands, combine_stage_metrics(stages)
 
 
+def execute_run(index, total, cfg, args, code_dir, info):
+    rid = run_id(cfg)
+    log_path = OUT / "logs" / f"{rid}.log"
+    start = time.perf_counter()
+    status, rc, commands, parsed = run_staged_command(cfg, rid, args, code_dir, log_path)
+    wall = time.perf_counter() - start
+    if status == "ok" and not parsed["final"]:
+        status = "no_metrics"          # finished but the parser found nothing: check the log
+    checkpoint_paths = {str(max(ROUNDS)): str(checkpoint_path_for(rid, max(ROUNDS)))}
+    rec = {"run_id": rid, "config": cfg, "command": commands, "status": status,
+           "checkpoint_paths": checkpoint_paths,
+           "returncode": rc, "wall_clock_s": round(wall, 3),
+           "finished_at": datetime.now().isoformat(timespec="seconds"),
+           "env": info, **parsed}
+    return index, total, rid, wall, parsed["final"].get("acc"), rec
+
+
 def cmd_run(args):
     code_dir = Path(args.code_dir).resolve()
     (OUT / "logs").mkdir(parents=True, exist_ok=True)
@@ -337,30 +357,40 @@ def cmd_run(args):
     if args.limit:
         todo = todo[: args.limit]
     info = env_info(code_dir)
-    print(f"{len(todo)} runs to execute ({len(done)} already recorded).", flush=True)
+    max_workers = max(1, int(args.max_workers))
+    max_workers = min(max_workers, len(todo) or 1)
+    print(
+        f"{len(todo)} runs to execute ({len(done)} already recorded), "
+        f"max_workers={max_workers}.",
+        flush=True,
+    )
 
-    for i, cfg in enumerate(todo, 1):
-        rid = run_id(cfg)
-        log_path = OUT / "logs" / f"{rid}.log"
-        print(f"[{i}/{len(todo)}] {rid}", flush=True)
-        start = time.perf_counter()
-        wall = time.perf_counter() - start
-        status, rc, commands, parsed = run_staged_command(cfg, rid, args, code_dir, log_path)
-        wall = time.perf_counter() - start
-        if status == "ok" and not parsed["final"]:
-            status = "no_metrics"          # finished but the parser found nothing: check the log
-        checkpoint_paths = {str(max(ROUNDS)): str(checkpoint_path_for(rid, max(ROUNDS)))}
-        rec = {"run_id": rid, "config": cfg, "command": commands, "status": status,
-               "checkpoint_paths": checkpoint_paths,
-               "returncode": rc, "wall_clock_s": round(wall, 3),
-               "finished_at": datetime.now().isoformat(timespec="seconds"),
-               "env": info, **parsed}
+    def write_record(rec):
         with open(OUT / "runs.jsonl", "a") as f:
             f.write(json.dumps(rec) + "\n")
-        acc = parsed["final"].get("acc")
-        print(f"    -> {status}, {wall:.1f}s, final acc={acc}", flush=True)
-        if i < len(todo):
-            time.sleep(COOLDOWN_S)
+
+    if max_workers == 1:
+        for i, cfg in enumerate(todo, 1):
+            rid = run_id(cfg)
+            print(f"[{i}/{len(todo)}] {rid}", flush=True)
+            _index, _total, _rid, wall, acc, rec = execute_run(i, len(todo), cfg, args, code_dir, info)
+            write_record(rec)
+            print(f"    -> {rec['status']}, {wall:.1f}s, final acc={acc}", flush=True)
+            if i < len(todo):
+                time.sleep(COOLDOWN_S)
+        return
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = []
+        for i, cfg in enumerate(todo, 1):
+            rid = run_id(cfg)
+            print(f"[{i}/{len(todo)}] started {rid}", flush=True)
+            futures.append(executor.submit(execute_run, i, len(todo), cfg, args, code_dir, info))
+
+        for future in as_completed(futures):
+            i, total, rid, wall, acc, rec = future.result()
+            write_record(rec)
+            print(f"[{i}/{total}] finished {rid} -> {rec['status']}, {wall:.1f}s, final acc={acc}", flush=True)
 
 
 def cmd_plan(_args):
@@ -524,7 +554,7 @@ def cmd_summarize(args):
 def main():
     global OUT
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--out", default=str(OUT), help="output folder (default: baseline_results)")
+    p.add_argument("--out", default=str(OUT), help=f"output folder (default: {OUT})")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("plan")
     r = sub.add_parser("run")
@@ -534,6 +564,8 @@ def main():
     r.add_argument("--limit", type=int, default=0)
     r.add_argument("--retry-failed", action="store_true",
                    help="re-run runs recorded as failed/timeout/no_metrics (default: skip them)")
+    r.add_argument("--max-workers", type=int, default=1,
+                   help="number of runs to execute concurrently on this machine")
     r.add_argument("--no-shuffle", dest="shuffle", action="store_false")
     r.add_argument("--shuffle-seed", type=int, default=0)
     q = sub.add_parser("parse")
