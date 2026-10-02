@@ -45,8 +45,8 @@ from pathlib import Path
 # =====================================================================
 GRID = {
     "paradigm":    ["fl", "sl", "sfl"],
-    "model":       ["cnn"],
-    "dataset":     ["mnist"],                     # CHECK: must match DATASET_CHOICES
+    "model":       ["resnet18"],
+    "dataset":     ["cifar10"],                     # CHECK: must match DATASET_CHOICES
     "num_clients": [3, 5, 10],
     "cpus":        [1],
     "alpha":       [0.1, 0.5, 0.9, 1.0],          # 1.0 = IID in your code
