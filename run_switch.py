@@ -410,10 +410,6 @@ def real_round(args, setup, method, checkpoint_path, log_path, alpha):
     command = build_training_command(args, setup, method, checkpoint_path, alpha)
     code_dir = Path(args.code_dir).resolve()
     env = os.environ.copy()
-    env.setdefault(
-        "SIMULATION_TOTAL_CPUS",
-        str(max(1, math.ceil(args.num_clients * args.client_num_cpus))),
-    )
 
     start = time.perf_counter()
     with open(log_path, "w") as log:
