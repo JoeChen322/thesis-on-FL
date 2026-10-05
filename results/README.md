@@ -15,7 +15,6 @@ here is the results for all combination of the parameters, the experiments are r
 
 - **SFL, K=10, non-IID oscillates strongly.** Repeated runs with the same data partition differ a lot. MNIST α=0.9 reaches 96.03 / 97.74 / 55.13% after 10 rounds. CIFAR-10 α=0.9 reaches 24.95 / 39.59 / 53.91 / 55.32%. 
 - **Accuracy collapses when entering FL.** FL starts at ~10% after round 1. In the switching runs, every switch into FL drops accuracy to 11–13% for one round (SL→FL 52.86→11.72%, SFL→FL 32.43→12.83%). The CNN (no BatchNorm) shows neither effect. Suspected cause: FedAvg over BatchNorm statistics on non-IID data (not verified yet).
-- **Run-to-run noise is about 3 points.** The same static FL config gives 64.65% in the baseline and 67.48% in the switching run, with the same seed (CPU computation is not fully deterministic).
 - **2 CPUs per client are slower than 1.** CIFAR-10, K=3, IID: median round time goes FL 147→190 s, SL 248→261 s, SFL 245→261 s, with unchanged accuracy. Cause not confirmed yet.
 
 ##TO DO
