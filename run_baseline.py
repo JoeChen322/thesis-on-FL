@@ -47,9 +47,9 @@ GRID = {
     "paradigm":    ["fl", "sl", "sfl"],
     "model":       ["resnet18"],
     "dataset":     ["cifar10"],                     # CHECK: must match DATASET_CHOICES
-    "num_clients": [3, 5, 10],
-    "cpus":        [1],
-    "alpha":       [0.1, 0.5, 0.9, 1.0],          # 1.0 = IID in your code
+    "num_clients": [3],
+    "cpus":        [2],
+    "alpha":       [1.0],          # 1.0 = IID in your code
 }
 
 # Logical factors that are derived instead of executed (Section 4.1, "Experimental grid").
