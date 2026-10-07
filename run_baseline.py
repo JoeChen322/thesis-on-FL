@@ -46,14 +46,14 @@ from pathlib import Path
 GRID = {
     "paradigm":    ["fl", "sl", "sfl"],
     "model":       ["resnet18"],
-    "dataset":     ["mnist"],                     # CHECK: must match DATASET_CHOICES
+    "dataset":     ["cifar10"],                     # CHECK: must match DATASET_CHOICES
     "num_clients": [3,5,10],
     "cpus":        [1],
     "alpha":       [0.1,0.5,0.9,1.0],          # 1.0 = IID in your code
 }
 
 # Logical factors that are derived instead of executed (Section 4.1, "Experimental grid").
-ROUNDS = [10, 20]                 # checkpoints are retained at each listed round
+ROUNDS = [20]                 # checkpoints are retained at each listed round
 NETWORK = {
     "stable": "0",
 }
