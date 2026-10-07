@@ -53,7 +53,7 @@ GRID = {
 }
 
 # Logical factors that are derived instead of executed (Section 4.1, "Experimental grid").
-ROUNDS = [5, 10]                 # checkpoints are retained at each listed round
+ROUNDS = [10, 20]                 # checkpoints are retained at each listed round
 NETWORK = {
     "stable": "0",
 }
