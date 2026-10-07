@@ -71,8 +71,7 @@ SCRIPTS = {"fl": "fl_mnist_minimal.py", "sl": "sl_mnist_minimal.py", "sfl": "fsl
 # CHECK: use the flag names defined in add_resnet_model_args() in split_learning_utils.py
 MODEL_ARGS = {
     "cnn": ["--model", "cnn", "--cnn-split-after", "conv1"],
-    "resnet18": ["--model", "resnet", "--resnet-depth", "18"],
-    "resnet34": ["--model", "resnet", "--resnet-depth", "34"],
+    "resnet18": ["--model", "resnet", "--resnet-depth", "18"]
 }
 
 OUT = Path("baseline_results_mnist_cnn")
