@@ -18,6 +18,7 @@ from split_learning_utils import (
     build_ray_backend_config,
     check_simulation_backend,
     client_num_threads,
+    configure_client_cpu_affinity,
     configure_thread_env,
     configure_torch_threads,
 )
@@ -185,6 +186,7 @@ def make_client_app(
         config = message.content["config"]#get the content
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         client_id = int(config["client_id"])
+        configure_client_cpu_affinity(client_id, num_threads)
         num_clients = int(config["num_clients"])
         batch_index = int(config["batch_index"])
         batch_size = int(config["batch_size"])
@@ -236,6 +238,7 @@ def make_client_app(
         config = message.content["config"]
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         client_id = int(config["client_id"])
+        configure_client_cpu_affinity(client_id, num_threads)
         num_clients = int(config["num_clients"])
         batch_index = int(config["batch_index"])
         batch_size = int(config["batch_size"])
@@ -313,6 +316,7 @@ def make_client_app(
 
         config = message.content["config"]
         client_id = int(config["client_id"])
+        configure_client_cpu_affinity(client_id, num_threads)
         num_clients = int(config["num_clients"])
         boundary_score = float(boundary_condition_fn(client_id, num_clients))
         return Message(RecordDict({

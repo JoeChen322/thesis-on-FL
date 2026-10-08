@@ -24,6 +24,7 @@ from split_learning_utils import (
     check_simulation_backend,
     client_size,
     client_num_threads,
+    configure_client_cpu_affinity,
     configure_thread_env,
     configure_torch_threads,
     fedavg_state_dicts,
@@ -136,6 +137,7 @@ class FlowerClient(fl.client.NumPyClient):
         self.client_id = client_id
         self.device = device
         self.num_threads = num_threads
+        configure_client_cpu_affinity(client_id, num_threads)
 
         client_model_cls, server_model_cls = get_model_classes(
             dataset_name,
@@ -151,10 +153,12 @@ class FlowerClient(fl.client.NumPyClient):
 
     def get_parameters(self, config):
         configure_torch_threads(self.num_threads)
+        configure_client_cpu_affinity(self.client_id, self.num_threads)
         return get_parameters(self.model)
 
     def fit(self, parameters, config):
         configure_torch_threads(self.num_threads)
+        configure_client_cpu_affinity(self.client_id, self.num_threads)
         set_parameters(self.model, parameters)
 
         train_start = time.perf_counter()
@@ -174,6 +178,7 @@ class FlowerClient(fl.client.NumPyClient):
 
     def evaluate(self, parameters, config):
         configure_torch_threads(self.num_threads)
+        configure_client_cpu_affinity(self.client_id, self.num_threads)
         set_parameters(self.model, parameters)
 
         loss, accuracy = evaluate_model(
@@ -331,6 +336,7 @@ def make_client_app(num_clients, noniid_alpha, dataset_name, model_config, num_t
     def client_fn(context):
         configure_torch_threads(num_threads)
         client_id = int(context.node_config["partition-id"])
+        configure_client_cpu_affinity(client_id, num_threads)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         return FlowerClient(
             client_id,

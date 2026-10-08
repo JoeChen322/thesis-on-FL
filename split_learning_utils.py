@@ -18,6 +18,8 @@ _DATASET_CACHE = {}
 _SPLIT_CACHE = {}
 MIN_DIRICHLET_ALPHA = 1e-3
 SIMULATION_TOTAL_CPUS_ENV = "SIMULATION_TOTAL_CPUS"
+CLIENT_CPUSET_CPUS_ENV = "CLIENT_CPUSET_CPUS"
+CLIENT_CPUSET_LOGGED_ENV = "CLIENT_CPUSET_LOGGED"
 THREAD_ENV_VARS = (
     "OMP_NUM_THREADS",
     "MKL_NUM_THREADS",
@@ -74,6 +76,50 @@ def configure_torch_threads(num_threads):
     configure_thread_env(num_threads)
     torch.set_num_threads(num_threads)
     return torch.get_num_threads()
+
+
+def parse_cpu_set(value):
+    cpus = []
+    for part in str(value).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start, end = (int(item) for item in part.split("-", 1))
+            if end < start:
+                raise ValueError(f"Invalid CPU range: {part}")
+            cpus.extend(range(start, end + 1))
+        else:
+            cpus.append(int(part))
+    if not cpus:
+        raise ValueError(f"{CLIENT_CPUSET_CPUS_ENV} cannot be empty")
+    return cpus
+
+
+def configure_client_cpu_affinity(client_id, cpus_per_client):
+    cpuset = os.environ.get(CLIENT_CPUSET_CPUS_ENV)
+    if not cpuset:
+        return None
+    cpus = parse_cpu_set(cpuset)
+    width = max(1, math.ceil(float(cpus_per_client)))
+    start = int(client_id) * width
+    assigned = cpus[start:start + width]
+    if len(assigned) < width:
+        raise ValueError(
+            f"{CLIENT_CPUSET_CPUS_ENV}={cpuset} does not provide {width} CPUs "
+            f"for client {client_id}"
+        )
+    if not hasattr(os, "sched_setaffinity"):
+        if not os.environ.get(CLIENT_CPUSET_LOGGED_ENV):
+            print(
+                f"{CLIENT_CPUSET_CPUS_ENV} is set, but this OS does not support "
+                "sched_setaffinity; CPU pinning is skipped.",
+                flush=True,
+            )
+            os.environ[CLIENT_CPUSET_LOGGED_ENV] = "1"
+        return assigned
+    os.sched_setaffinity(0, set(assigned))
+    return assigned
 
 
 class BasicBlock(nn.Module):

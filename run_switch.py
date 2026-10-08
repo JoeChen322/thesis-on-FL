@@ -410,6 +410,12 @@ def real_round(args, setup, method, checkpoint_path, log_path, alpha):
     command = build_training_command(args, setup, method, checkpoint_path, alpha)
     code_dir = Path(args.code_dir).resolve()
     env = os.environ.copy()
+    if args.simulation_total_cpus:
+        env["SIMULATION_TOTAL_CPUS"] = str(args.simulation_total_cpus)
+    elif args.cpuset_cpus:
+        env["SIMULATION_TOTAL_CPUS"] = str(count_cpu_set(args.cpuset_cpus))
+    if args.cpuset_cpus:
+        env["CLIENT_CPUSET_CPUS"] = args.cpuset_cpus
 
     start = time.perf_counter()
     with open(log_path, "w") as log:
@@ -456,6 +462,7 @@ def simulated_round(rows, scenario, method, global_round):
 def run_scenario(name, args, rows, simulate=False):
     scenario = resolve_scenario(name, rows, args.num_rounds)
     args.num_clients = scenario["K"]
+    validate_cpu_binding(args)
     cal = calibrate(rows, args.setup, scenario["K"], scenario["alpha"])
     schedule = scenario["schedule"](cal, scenario["rounds"])
     if scenario["start"] == "auto":
@@ -776,6 +783,17 @@ def add_common_args(parser):
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--num-rounds", type=int, default=DEFAULT_ROUNDS)
     parser.add_argument("--client-num-cpus", type=float, default=1.0)
+    parser.add_argument(
+        "--simulation-total-cpus",
+        type=int,
+        default=0,
+        help="Ray CPU slots exposed to the simulation. Defaults to the cpuset size when --cpuset-cpus is set.",
+    )
+    parser.add_argument(
+        "--cpuset-cpus",
+        default="",
+        help="Linux CPU list/ranges, e.g. 0-5. Client actors are pinned in consecutive chunks sized by --client-num-cpus.",
+    )
     parser.add_argument("--client-num-gpus", type=float, default=0.0)
     parser.add_argument("--local-epochs", type=int, default=1)
     parser.add_argument("--max-batches", type=int, default=0)
@@ -792,12 +810,49 @@ def parse_args():
     return parser.parse_args()
 
 
+def count_cpu_set(value):
+    count = 0
+    for part in str(value).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start, end = (int(item) for item in part.split("-", 1))
+            if end < start:
+                raise ValueError(f"invalid CPU range: {part}")
+            count += end - start + 1
+        else:
+            int(part)
+            count += 1
+    if count < 1:
+        raise ValueError("--cpuset-cpus must name at least one CPU")
+    return count
+
+
+def validate_cpu_binding(args):
+    if args.simulation_total_cpus < 0:
+        raise ValueError("--simulation-total-cpus must be non-negative")
+    if not args.cpuset_cpus:
+        return
+    cpuset_count = count_cpu_set(args.cpuset_cpus)
+    required = math.ceil(args.num_clients * args.client_num_cpus)
+    if args.simulation_total_cpus and args.simulation_total_cpus > cpuset_count:
+        raise ValueError("--simulation-total-cpus cannot exceed the --cpuset-cpus size")
+    if required > cpuset_count:
+        raise ValueError(
+            f"--cpuset-cpus provides {cpuset_count} CPUs, but "
+            f"{args.num_clients} clients x {args.client_num_cpus} CPUs requires {required}"
+        )
+
+
 def main():
     args = parse_args()
     if args.num_rounds < 1:
         raise ValueError("--num-rounds must be at least 1")
     if args.client_num_cpus <= 0:
         raise ValueError("--client-num-cpus must be positive")
+    if args.simulation_total_cpus < 0:
+        raise ValueError("--simulation-total-cpus must be non-negative")
     {"plan": cmd_plan, "run": cmd_run, "report": cmd_report}[args.cmd](args)
 
 
