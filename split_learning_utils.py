@@ -20,6 +20,8 @@ MIN_DIRICHLET_ALPHA = 1e-3
 SIMULATION_TOTAL_CPUS_ENV = "SIMULATION_TOTAL_CPUS"
 CLIENT_CPUSET_CPUS_ENV = "CLIENT_CPUSET_CPUS"
 CLIENT_CPUSET_LOGGED_ENV = "CLIENT_CPUSET_LOGGED"
+SERVER_CPUSET_CPUS_ENV = "SERVER_CPUSET_CPUS"
+SERVER_CPUSET_LOGGED_ENV = "SERVER_CPUSET_LOGGED"
 THREAD_ENV_VARS = (
     "OMP_NUM_THREADS",
     "MKL_NUM_THREADS",
@@ -120,6 +122,32 @@ def configure_client_cpu_affinity(client_id, cpus_per_client):
         return assigned
     os.sched_setaffinity(0, set(assigned))
     return assigned
+
+
+def configure_process_cpu_affinity(cpus, label, logged_env):
+    assigned = parse_cpu_set(cpus)
+    if not hasattr(os, "sched_setaffinity"):
+        if not os.environ.get(logged_env):
+            print(
+                f"{label} CPU affinity requested, but this OS does not support "
+                "sched_setaffinity; CPU pinning is skipped.",
+                flush=True,
+            )
+            os.environ[logged_env] = "1"
+        return assigned
+    os.sched_setaffinity(0, set(assigned))
+    return assigned
+
+
+def configure_server_cpu_affinity():
+    cpuset = os.environ.get(SERVER_CPUSET_CPUS_ENV)
+    if not cpuset:
+        return None
+    return configure_process_cpu_affinity(
+        cpuset,
+        "Server",
+        SERVER_CPUSET_LOGGED_ENV,
+    )
 
 
 class BasicBlock(nn.Module):
