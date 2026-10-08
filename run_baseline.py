@@ -28,6 +28,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import itertools
 import json
+import math
 import os
 import platform
 import random
@@ -115,6 +116,39 @@ def all_configs():
 def run_id(cfg):
     base = "{paradigm}_{model}_{dataset}_K{num_clients}_c{cpus}_a{alpha}_r{repeat}".format(**cfg)
     return base
+
+
+def count_cpu_set(value):
+    count = 0
+    for part in str(value).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start, end = (int(item) for item in part.split("-", 1))
+            if end < start:
+                raise ValueError(f"invalid CPU range: {part}")
+            count += end - start + 1
+        else:
+            int(part)
+            count += 1
+    if count < 1:
+        raise ValueError("--cpuset-cpus must name at least one CPU")
+    return count
+
+
+def env_for_run(cfg, args):
+    """CLIENT_CPUSET_CPUS / SIMULATION_TOTAL_CPUS, same scheme as run_switch.py."""
+    env = os.environ.copy()
+    if args.cpuset_cpus:
+        env["CLIENT_CPUSET_CPUS"] = args.cpuset_cpus
+        env["SIMULATION_TOTAL_CPUS"] = str(
+            args.simulation_total_cpus
+            or math.ceil(cfg["num_clients"] * cfg["cpus"])
+        )
+    elif args.simulation_total_cpus:
+        env["SIMULATION_TOTAL_CPUS"] = str(args.simulation_total_cpus)
+    return env
 
 
 def checkpoint_path_for(rid, round_count):
@@ -249,6 +283,7 @@ def run_staged_command(cfg, rid, args, code_dir, log_path):
     retained_round = max(ROUNDS)
     status, rc = "ok", None
 
+    env = env_for_run(cfg, args)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with open(log_path, "w") as log:
@@ -276,6 +311,7 @@ def run_staged_command(cfg, rid, args, code_dir, log_path):
                     proc = subprocess.run(
                         cmd,
                         cwd=code_dir,
+                        env=env,
                         stdout=log,
                         stderr=subprocess.STDOUT,
                         timeout=TIMEOUT_S,
@@ -349,6 +385,16 @@ def cmd_run(args):
             if (not args.only_paradigm or c["paradigm"] == args.only_paradigm)
             and not (run_id(c) in done
                      and (done[run_id(c)]["status"] == "ok" or not args.retry_failed))]
+    if args.cpuset_cpus:
+        cpuset_count = count_cpu_set(args.cpuset_cpus)
+        if args.simulation_total_cpus and args.simulation_total_cpus > cpuset_count:
+            raise ValueError("--simulation-total-cpus cannot exceed the --cpuset-cpus size")
+        required = max(math.ceil(c["num_clients"] * c["cpus"]) for c in todo) if todo else 0
+        if required > cpuset_count:
+            raise ValueError(
+                f"--cpuset-cpus provides {cpuset_count} CPUs, but the grid needs up to "
+                f"{required} (num_clients x cpus)"
+            )
     if args.shuffle:
         # Random order spreads slow drifts (thermal throttling, background load)
         # over all configurations instead of biasing one paradigm.
@@ -567,6 +613,19 @@ def main():
                    help="number of runs to execute concurrently on this machine")
     r.add_argument("--no-shuffle", dest="shuffle", action="store_false")
     r.add_argument("--shuffle-seed", type=int, default=0)
+    r.add_argument(
+        "--cpuset-cpus",
+        default="",
+        help="Linux CPU list/ranges, e.g. 0-9. Sets CLIENT_CPUSET_CPUS so clients are pinned "
+             "(see configure_client_cpu_affinity in split_learning_utils.py).",
+    )
+    r.add_argument(
+        "--simulation-total-cpus",
+        type=int,
+        default=0,
+        help="Ray CPU slots exposed to the simulation. Defaults to num_clients x cpus per run "
+             "when --cpuset-cpus is set.",
+    )
     q = sub.add_parser("parse")
     q.add_argument("log")
     s = sub.add_parser("summarize")
