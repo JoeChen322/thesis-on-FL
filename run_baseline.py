@@ -118,8 +118,8 @@ def run_id(cfg):
     return base
 
 
-def count_cpu_set(value):
-    count = 0
+def parse_cpu_ids(value):
+    cpus = []
     for part in str(value).split(","):
         part = part.strip()
         if not part:
@@ -128,13 +128,38 @@ def count_cpu_set(value):
             start, end = (int(item) for item in part.split("-", 1))
             if end < start:
                 raise ValueError(f"invalid CPU range: {part}")
-            count += end - start + 1
+            cpus.extend(range(start, end + 1))
         else:
-            int(part)
-            count += 1
-    if count < 1:
-        raise ValueError("--cpuset-cpus must name at least one CPU")
-    return count
+            cpus.append(int(part))
+    if not cpus:
+        raise ValueError("CPU list cannot be empty")
+    return cpus
+
+
+def count_cpu_set(value):
+    return len(parse_cpu_ids(value))
+
+
+def physical_core_overlap(server_cpus, client_cpus, total_logical_cpus):
+    """Logical CPU ids that hyperthread siblings turn into the same physical core.
+
+    Assumes the common Linux sibling layout on an N-vCPU host: thread 0 of
+    physical core i is logical cpu i, thread 1 is logical cpu i + N/2 (e.g. on a
+    16-vCPU / 8-core host, cpu 3 and cpu 11 are the same physical core). Verify
+    with `lscpu -e` if a host uses a different layout.
+    """
+    half = total_logical_cpus // 2
+    if half <= 0:
+        return set()
+    server_phys = {c % half for c in server_cpus}
+    client_phys = {c % half for c in client_cpus}
+    return server_phys & client_phys
+
+
+def wrap_with_taskset(cmd, server_cpuset_cpus):
+    if not server_cpuset_cpus:
+        return cmd
+    return ["taskset", "-c", server_cpuset_cpus, *cmd]
 
 
 def env_for_run(cfg, args):
@@ -298,6 +323,7 @@ def run_staged_command(cfg, rid, args, code_dir, log_path):
                     num_rounds=stage_rounds,
                     checkpoint_path=checkpoint_path,
                 )
+                cmd = wrap_with_taskset(cmd, args.server_cpuset_cpus)
                 commands.append(cmd)
                 log.write(
                     f"# Stage to global round {target_round}: "
@@ -395,6 +421,27 @@ def cmd_run(args):
                 f"--cpuset-cpus provides {cpuset_count} CPUs, but the grid needs up to "
                 f"{required} (num_clients x cpus)"
             )
+    if args.server_cpuset_cpus:
+        if shutil.which("taskset") is None:
+            raise RuntimeError(
+                "--server-cpuset-cpus requires the `taskset` binary (util-linux, Linux-only); "
+                "not found on PATH."
+            )
+        if args.cpuset_cpus:
+            total_logical_cpus = args.total_logical_cpus or os.cpu_count() or 0
+            overlap = physical_core_overlap(
+                parse_cpu_ids(args.server_cpuset_cpus),
+                parse_cpu_ids(args.cpuset_cpus),
+                total_logical_cpus,
+            )
+            if overlap:
+                half = total_logical_cpus // 2
+                raise ValueError(
+                    f"--server-cpuset-cpus and --cpuset-cpus map to the same physical core(s) "
+                    f"{sorted(overlap)}, assuming hyperthread siblings are i and i+{half} on a "
+                    f"{total_logical_cpus}-vCPU host. Run `lscpu -e` to confirm the real topology "
+                    "and pick CPU ids on disjoint physical cores, or pass --total-logical-cpus."
+                )
     if args.shuffle:
         # Random order spreads slow drifts (thermal throttling, background load)
         # over all configurations instead of biasing one paradigm.
@@ -625,6 +672,23 @@ def main():
         default=0,
         help="Ray CPU slots exposed to the simulation. Defaults to num_clients x cpus per run "
              "when --cpuset-cpus is set.",
+    )
+    r.add_argument(
+        "--server-cpuset-cpus",
+        default="",
+        help="Linux CPU list/ranges for the server/driver process, e.g. 0-1. Runs the whole "
+             "staged command under `taskset -c <cpus>` so the server (and any client actor "
+             "before it self-pins) starts out confined to these cores; each client then moves "
+             "itself onto its own cores via --cpuset-cpus. Pick cores that are physically "
+             "distinct from --cpuset-cpus (see --total-logical-cpus).",
+    )
+    r.add_argument(
+        "--total-logical-cpus",
+        type=int,
+        default=0,
+        help="Logical CPU count used to detect hyperthread-sibling overlap between "
+             "--server-cpuset-cpus and --cpuset-cpus (assumes siblings are i and i+N/2). "
+             "Defaults to os.cpu_count() on this machine.",
     )
     q = sub.add_parser("parse")
     q.add_argument("log")
