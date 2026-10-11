@@ -98,6 +98,23 @@ def parse_cpu_set(value):
     return cpus
 
 
+def _set_current_process_threads_affinity(assigned):
+    cpu_set = set(assigned)
+    if not hasattr(os, "sched_setaffinity"):
+        return
+
+    task_dir = Path("/proc/self/task")
+    if not task_dir.is_dir():
+        os.sched_setaffinity(0, cpu_set)
+        return
+
+    for task in task_dir.iterdir():
+        try:
+            os.sched_setaffinity(int(task.name), cpu_set)
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+
+
 def configure_client_cpu_affinity(client_id, cpus_per_client):
     cpuset = os.environ.get(CLIENT_CPUSET_CPUS_ENV)
     if not cpuset:
@@ -120,7 +137,7 @@ def configure_client_cpu_affinity(client_id, cpus_per_client):
             )
             os.environ[CLIENT_CPUSET_LOGGED_ENV] = "1"
         return assigned
-    os.sched_setaffinity(0, set(assigned))
+    _set_current_process_threads_affinity(assigned)
     return assigned
 
 
@@ -135,7 +152,7 @@ def configure_process_cpu_affinity(cpus, label, logged_env):
             )
             os.environ[logged_env] = "1"
         return assigned
-    os.sched_setaffinity(0, set(assigned))
+    _set_current_process_threads_affinity(assigned)
     return assigned
 
 
