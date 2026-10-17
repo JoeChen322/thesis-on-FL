@@ -59,6 +59,7 @@ NETWORK = {
     "stable": "0",
 }
 REPEATS = 1                      # repetitions of each executed run, to measure timing noise
+BASE_SEED = 1234                 # repeat r uses seed BASE_SEED + r (repeat 0 = the original runs)
 SPLIT_AFTER = "layer2"           # same cut layer for SL and SFL, so they differ only in aggregation
 LOCAL_EPOCHS = 1
 MAX_BATCHES = 0                  # SL/SFL only; 0 = full local dataset
@@ -162,9 +163,15 @@ def wrap_with_taskset(cmd, server_cpuset_cpus):
     return ["taskset", "-c", server_cpuset_cpus, *cmd]
 
 
+def seed_for(cfg):
+    """Seed of one run: model initialization, data order and client partition."""
+    return BASE_SEED + int(cfg.get("repeat", 0))
+
+
 def env_for_run(cfg, args):
     """CLIENT_CPUSET_CPUS / SIMULATION_TOTAL_CPUS, same scheme as run_switch.py."""
     env = os.environ.copy()
+    env["THESIS_SEED"] = str(seed_for(cfg))
     if args.cpuset_cpus:
         env["CLIENT_CPUSET_CPUS"] = args.cpuset_cpus
         env["SIMULATION_TOTAL_CPUS"] = str(
@@ -394,7 +401,7 @@ def execute_run(index, total, cfg, args, code_dir, info):
     if status == "ok" and not parsed["final"]:
         status = "no_metrics"          # finished but the parser found nothing: check the log
     checkpoint_paths = {str(max(ROUNDS)): str(checkpoint_path_for(rid, max(ROUNDS)))}
-    rec = {"run_id": rid, "config": cfg, "command": commands, "status": status,
+    rec = {"run_id": rid, "config": cfg, "seed": seed_for(cfg), "command": commands, "status": status,
            "checkpoint_paths": checkpoint_paths,
            "returncode": rc, "wall_clock_s": round(wall, 3),
            "finished_at": datetime.now().isoformat(timespec="seconds"),

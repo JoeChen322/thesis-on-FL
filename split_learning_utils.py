@@ -13,7 +13,9 @@ from torch.utils.data import DataLoader, Subset, default_collate
 from torchvision import datasets, transforms
 
 
-SEED = 1234
+# Seed for model initialization, data order and client partition. run_baseline.py sets
+# THESIS_SEED per repeat (base seed + repeat index); without it the default 1234 is used.
+SEED = int(os.environ.get("THESIS_SEED", "1234"))
 _DATASET_CACHE = {}
 _SPLIT_CACHE = {}
 MIN_DIRICHLET_ALPHA = 1e-3
