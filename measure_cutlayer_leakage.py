@@ -4,6 +4,15 @@ Measure leakage for one trained SFL client cut layer.
 This script is for a concrete trained client model, for example a client
 checkpoint whose split point is layer4. It does not use forward hooks. The
 client model's forward output is exactly the smashed data Z sent to the server.
+
+Reported per checkpoint:
+  * dCor(X, Z) and a permutation baseline dCor(X, Z_perm), where the samples of Z
+    are shuffled within each batch; delta_dcor = dcor - dcor_perm. The raw dCor is
+    biased upwards for high-dimensional Z, so compare delta_dcor across cut layers.
+  * optionally a reconstruction attack: a decoder trained to map Z back to the
+    image in pixel space [0, 1] (matching its sigmoid output); MSE, PSNR and the MSE
+    of an attacker that always outputs the mean training image.
+Works for the split ResNet and the split CNN (architecture read from the checkpoint).
 """
 
 from __future__ import annotations
@@ -23,13 +32,13 @@ from split_learning_utils import (
     DATASET_CHOICES,
     DATASET_SPECS,
     RESNET_SPLIT_POINTS,
-    SplitResNetClientNet,
     add_resnet_model_args,
     client_size,
     fedavg_state_dicts,
+    get_model_classes,
     get_resnet_model_config_from_args,
     load_dataset,
-    normalize_resnet_config,
+    normalize_model_config,
     set_seed,
 )
 
@@ -44,7 +53,8 @@ def load_checkpoint(path: str) -> dict:
     checkpoint_path = Path(path)
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-    return torch.load(checkpoint_path, map_location="cpu")
+    # the checkpoints also store metadata (partition, config), not only tensors
+    return torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
 
 def checkpoint_model_config(checkpoint: dict) -> dict | None:
@@ -54,7 +64,7 @@ def checkpoint_model_config(checkpoint: dict) -> dict | None:
     model_config = partition.get("model")
     if not model_config:
         return None
-    return normalize_resnet_config(**model_config)
+    return normalize_model_config(model_config)
 
 
 def looks_like_state_dict(value) -> bool:
@@ -127,7 +137,7 @@ def load_client_model(
     if checkpoint_config is not None:
         model_config = checkpoint_config
 
-    if model_config["split_after"] != args.expected_split_after:
+    if args.expected_split_after and model_config["split_after"] != args.expected_split_after:
         raise ValueError(
             f"Checkpoint/model config split_after is '{model_config['split_after']}', "
             f"but --expected-split-after is '{args.expected_split_after}'. "
@@ -142,11 +152,7 @@ def load_client_model(
                 f"but --dataset is '{args.dataset}'"
             )
 
-    input_channels = DATASET_SPECS[args.dataset]["input_channels"]
-    client_model = SplitResNetClientNet(
-        input_channels=input_channels,
-        model_config=model_config,
-    )
+    client_model = get_model_classes(args.dataset, model_config)[0]()
     client_state, state_label = select_client_state(
         checkpoint,
         args.dataset,
@@ -181,8 +187,10 @@ def measure_dcor(
     dataloader: DataLoader,
     device: torch.device,
     num_batches: int,
+    seed: int = 0,
 ) -> tuple[dict, tuple[int, ...]]:
-    values = []
+    values, perm_values = [], []
+    generator = torch.Generator().manual_seed(seed)
     total_samples = 0
     z_shape = None
     z_bytes_per_sample = None
@@ -193,6 +201,8 @@ def measure_dcor(
         x = x.to(device)
         z = client_model(x)
         values.append(float(dist_corr(x, z).item()))
+        order = torch.randperm(z.shape[0], generator=generator).to(z.device)
+        perm_values.append(float(dist_corr(x, z[order]).item()))
         total_samples += int(x.shape[0])
         z_shape = tuple(int(dim) for dim in z.shape[1:])
         z_bytes_per_sample = int(math.prod(z_shape) * z.element_size())
@@ -200,12 +210,19 @@ def measure_dcor(
     if not values:
         raise RuntimeError("No DCOR batches were measured.")
 
-    mean = sum(values) / len(values)
-    std = (sum((value - mean) ** 2 for value in values) / len(values)) ** 0.5
+    def mean_std(v):
+        m = sum(v) / len(v)
+        return m, (sum((value - m) ** 2 for value in v) / len(v)) ** 0.5
+
+    mean, std = mean_std(values)
+    perm_mean, perm_std = mean_std(perm_values)
     return (
         {
             "mean_dcor": mean,
             "std_dcor": std,
+            "mean_dcor_perm": perm_mean,
+            "std_dcor_perm": perm_std,
+            "delta_dcor": mean - perm_mean,
             "batches": len(values),
             "samples": total_samples,
             "z_shape": "x".join(str(dim) for dim in z_shape),
@@ -221,14 +238,16 @@ def build_activation_pairs(
     client_model: torch.nn.Module,
     dataloader: DataLoader,
     device: torch.device,
+    mean: torch.Tensor,
+    std: torch.Tensor,
 ) -> TensorDataset:
+    """(Z, X) pairs with X mapped back from the normalized input to pixel space [0, 1]."""
     z_batches = []
     x_batches = []
     for x, _y in dataloader:
-        x = x.to(device)
-        z = client_model(x)
+        z = client_model(x.to(device))
         z_batches.append(z.detach().cpu())
-        x_batches.append(x.detach().cpu())
+        x_batches.append((x * std + mean).clamp(0, 1))
     if not z_batches:
         raise RuntimeError("No activation pairs were generated.")
     return TensorDataset(torch.cat(z_batches, dim=0), torch.cat(x_batches, dim=0))
@@ -258,11 +277,15 @@ def run_reconstruction_attack(
         start=train_samples,
         num_samples=eval_samples,
     )
-    attack_train_pairs = build_activation_pairs(client_model, train_loader, device)
-    attack_eval_pairs = build_activation_pairs(client_model, eval_loader, device)
+    spec = DATASET_SPECS[dataset_name]
+    input_channels = spec["input_channels"]
+    mean = torch.tensor(spec["normalize_mean"]).view(1, input_channels, 1, 1)
+    std = torch.tensor(spec["normalize_std"]).view(1, input_channels, 1, 1)
+    attack_train_pairs = build_activation_pairs(client_model, train_loader, device, mean, std)
+    attack_eval_pairs = build_activation_pairs(client_model, eval_loader, device, mean, std)
 
-    input_channels = DATASET_SPECS[dataset_name]["input_channels"]
     input_size = 28 if dataset_name == "mnist" else 32
+    torch.manual_seed(0)  # same decoder initialization for every checkpoint
     decoder = SimpleDecoder(
         in_channels=int(z_shape[0]),
         out_channels=input_channels,
@@ -276,8 +299,13 @@ def run_reconstruction_attack(
     mse = tester.evaluate(
         DataLoader(attack_eval_pairs, batch_size=batch_size, shuffle=False)
     )
+    x_train = attack_train_pairs.tensors[1]
+    x_eval = attack_eval_pairs.tensors[1]
+    mean_image_mse = float(((x_eval - x_train.mean(0, keepdim=True)) ** 2).mean())
     return {
         "attack_mse": float(mse),
+        "attack_psnr": 10 * math.log10(1 / max(float(mse), 1e-12)),
+        "attack_mse_mean_image": mean_image_mse,
         "attack_train_samples": len(attack_train_pairs),
         "attack_eval_samples": len(attack_eval_pairs),
         "attack_epochs": epochs,
@@ -362,9 +390,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--expected-split-after",
-        choices=RESNET_SPLIT_POINTS,
-        default="layer4",
-        help="Sanity check that the loaded client is cut at this layer.",
+        choices=("", *RESNET_SPLIT_POINTS, "conv1", "conv2"),
+        default="",
+        help="Optional sanity check that the loaded client is cut at this layer.",
     )
     parser.add_argument(
         "--checkpoint-client-id",
@@ -411,11 +439,11 @@ def main() -> None:
     if args.attack_epochs < 1:
         raise ValueError("--attack-epochs must be at least 1")
 
-    set_seed()
     device = resolve_device(args.device)
     rows = []
 
     for label, path in checkpoint_specs(args):
+        set_seed()  # same data order and attack initialization for every checkpoint
         client_model, state_label, model_config = load_client_model(args, device, path)
         dcor_samples = args.dcor_samples or args.dcor_batches * args.batch_size
         dcor_loader = make_subset_loader(
@@ -471,9 +499,15 @@ def main() -> None:
             f"std={result['std_dcor']:.6f}, "
             f"batches={result['batches']}, samples={result['samples']}"
         )
+        print(
+            f"DCOR(X, Z_perm): mean={result['mean_dcor_perm']:.6f}; "
+            f"delta DCOR={result['delta_dcor']:.6f}"
+        )
         if args.run_reconstruction_attack:
             print(
-                f"Reconstruction attack MSE: {result['attack_mse']:.6f} "
+                f"Reconstruction attack MSE: {result['attack_mse']:.6f}, "
+                f"PSNR: {result['attack_psnr']:.2f} dB, "
+                f"mean-image MSE: {result['attack_mse_mean_image']:.6f} "
                 f"(train_samples={result['attack_train_samples']}, "
                 f"eval_samples={result['attack_eval_samples']}, "
                 f"epochs={result['attack_epochs']})"
@@ -483,9 +517,10 @@ def main() -> None:
         print()
 
     print(
-        "Interpretation: lower DCOR means weaker statistical dependence between X "
-        "and Z. Higher reconstruction MSE means the trained decoder attack had "
-        "more difficulty reconstructing X from Z."
+        "Interpretation: lower delta DCOR means weaker statistical dependence between X "
+        "and Z. Higher reconstruction MSE (lower PSNR) means the decoder attack had more "
+        "difficulty reconstructing X from Z; an MSE close to the mean-image MSE means "
+        "the attack recovered little beyond the average image."
     )
 
     write_csv(args.csv_path, rows)
