@@ -59,6 +59,7 @@ NETWORK = {
     "stable": "0",
 }
 REPEATS = 1                      # repetitions of each executed run, to measure timing noise
+FIRST_REPEAT = 0                 # repeats FIRST_REPEAT .. REPEATS-1 are executed (see --repeats)
 BASE_SEED = 1234                 # repeat r uses seed BASE_SEED + r (repeat 0 = the original runs)
 SPLIT_AFTER = "layer2"           # same cut layer for SL and SFL, so they differ only in aggregation
 LOCAL_EPOCHS = 1
@@ -110,7 +111,7 @@ def all_configs():
     keys = list(GRID)
     for values in itertools.product(*(GRID[k] for k in keys)):
         cfg = dict(zip(keys, values))
-        for rep in range(REPEATS):
+        for rep in range(FIRST_REPEAT, REPEATS):
             yield {**cfg, "repeat": rep}
 
 
@@ -503,7 +504,8 @@ def cmd_plan(_args):
     print(f"  {'rounds':12s} {ROUNDS} (only round {max(ROUNDS)} checkpoint is retained)")
     print(f"  {'network':12s} {list(NETWORK)} (reported network conditions)")
     print(f"\nLogical configurations : {logical}")
-    print(f"Executed configurations: {executed}  x {REPEATS} repeats = {executed * REPEATS} staged runs")
+    print(f"Executed configurations: {executed}  x {REPEATS - FIRST_REPEAT} repeats "
+          f"(repeat {FIRST_REPEAT}..{REPEATS - 1}) = {executed * (REPEATS - FIRST_REPEAT)} staged runs")
     example = next(all_configs())
     example_checkpoint = OUT / CHECKPOINTS_DIRNAME / f".{run_id(example)}_<pid>_working.pt"
     print(
@@ -654,6 +656,12 @@ def main():
     global OUT
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--out", default=str(OUT), help=f"output folder (default: {OUT})")
+    p.add_argument("--model", choices=list(MODEL_ARGS), help="override GRID['model'] (one model)")
+    p.add_argument("--dataset", help="override GRID['dataset'] (one dataset)")
+    p.add_argument("--rounds", type=int, help="override ROUNDS (number of rounds of every run)")
+    p.add_argument("--repeats", default="",
+                   help="repeat indices to execute, e.g. 1-4 or 2 (seed = BASE_SEED + repeat); "
+                        "default: 0..REPEATS-1")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("plan")
     r = sub.add_parser("run")
@@ -703,6 +711,16 @@ def main():
     s.add_argument("--eps", type=float, default=1.0, help="accuracy tolerance in percentage points")
     args = p.parse_args()
     OUT = Path(args.out)
+    global ROUNDS, REPEATS, FIRST_REPEAT
+    if args.model:
+        GRID["model"] = [args.model]
+    if args.dataset:
+        GRID["dataset"] = [args.dataset]
+    if args.rounds:
+        ROUNDS = [args.rounds]
+    if args.repeats:
+        first, _, last = args.repeats.partition("-")
+        FIRST_REPEAT, REPEATS = int(first), int(last or first) + 1
     {"plan": cmd_plan, "run": cmd_run, "parse": cmd_parse, "summarize": cmd_summarize}[args.cmd](args)
 
 
