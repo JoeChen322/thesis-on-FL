@@ -14,6 +14,12 @@ reconstructed well). If rho falls below --rho-min, the cut is moved one stage de
 new cut are moved from the server model into every client model of the checkpoint, so training
 continues from the same weights. The cut is never moved back.
 
+If rho is still below --rho-min with the cut after layer4, training switches to FL (unless
+--no-fl). With the cut after layer4 the client model already contains all convolutional stages
+and is aggregated by the server in every round, so FL keeps that channel and removes the smashed
+data. FL continues from the same checkpoint; no leakage is measured in FL rounds, since FL sends
+no smashed data.
+
 With --static the cut stays where it starts (reference run).
 
 Output: <out>/<name>/rounds.csv (one row per round) and logs/.
@@ -48,7 +54,7 @@ from split_learning_utils import (
     set_seed,
 )
 
-SCRIPT = "fsl_mnist_minimal.py"
+SCRIPTS = {"sfl": "fsl_mnist_minimal.py", "fl": "fl_mnist_minimal.py"}
 MODEL_ARGS = ["--model", "resnet", "--resnet-depth", "18"]
 
 
@@ -86,14 +92,15 @@ def resplit_checkpoint(path: Path, new_split: str) -> str:
 # ---------------------------------------------------------------------------------------------
 # one round and its leakage
 # ---------------------------------------------------------------------------------------------
-def train_round(a, split: str, checkpoint: Path, log_path: Path) -> dict:
-    cmd = [a.python, str(Path(a.code_dir).resolve() / SCRIPT),
+def train_round(a, split: str, checkpoint: Path, log_path: Path, method: str = "sfl") -> dict:
+    cmd = [a.python, str(Path(a.code_dir).resolve() / SCRIPTS[method]),
            "--num-clients", str(a.num_clients), "--num-rounds", "1", "--local-epochs", "1",
            "--client-num-cpus", "1", "--client-num-gpus", "0", "--dataset", a.dataset,
            "--noniid-alpha", str(a.alpha), "--communication-delay", "0",
-           "--checkpoint-path", str(checkpoint), *MODEL_ARGS, "--resnet-split-after", split,
-           "--eval-every-round"]
-    if a.max_batches:
+           "--checkpoint-path", str(checkpoint), *MODEL_ARGS, "--resnet-split-after", split]
+    if method == "sfl":
+        cmd.append("--eval-every-round")
+    if a.max_batches and method == "sfl":
         cmd += ["--max-batches", str(a.max_batches)]
     start = time.perf_counter()
     with open(log_path, "w") as log:
@@ -157,6 +164,7 @@ def main() -> None:
     p.add_argument("--rho-min", type=float, default=0.4,
                    help="move the cut deeper when MSE(attack)/MSE(mean image) < rho-min")
     p.add_argument("--static", action="store_true", help="never move the cut (reference run)")
+    p.add_argument("--no-fl", action="store_true", help="stay in SFL after layer4")
     p.add_argument("--dcor-batches", type=int, default=10)
     p.add_argument("--attack-train-samples", type=int, default=512)
     p.add_argument("--attack-eval-samples", type=int, default=256)
@@ -173,25 +181,35 @@ def main() -> None:
     (run_dir / "logs").mkdir(parents=True)
     checkpoint = run_dir / "shared_checkpoint.pt"
     split = a.start_layer
+    method = "sfl"
     rows = []
     mode = "static" if a.static else f"adaptive, rho_min={a.rho_min}"
     print(f"== {a.name}: SFL ResNet-18 {a.dataset} K={a.num_clients} alpha={a.alpha} "
           f"start={split} ({mode}), {a.rounds} rounds", flush=True)
     for r in range(1, a.rounds + 1):
-        m = train_round(a, split, checkpoint, run_dir / "logs" / f"round{r:02d}_{split}.log")
-        leak = measure(a, checkpoint)
-        nxt, rule = split, ""
-        i = RESNET_SPLIT_POINTS.index(split)
-        if not a.static and leak["rho"] < a.rho_min and i + 1 < len(RESNET_SPLIT_POINTS):
-            nxt, rule = RESNET_SPLIT_POINTS[i + 1], "privacy"
-            resplit_checkpoint(checkpoint, nxt)
-        rows.append({"name": a.name, "round": r, "split": split, **m, **leak,
-                     "rho_min": "" if a.static else a.rho_min, "next_split": nxt, "rule": rule})
+        stage = split if method == "sfl" else "fl"
+        m = train_round(a, split, checkpoint, run_dir / "logs" / f"round{r:02d}_{stage}.log", method)
+        nxt_method, nxt, rule = method, split, ""
+        if method == "sfl":
+            leak = measure(a, checkpoint)
+            i = RESNET_SPLIT_POINTS.index(split)
+            if not a.static and leak["rho"] < a.rho_min:
+                if i + 1 < len(RESNET_SPLIT_POINTS):
+                    nxt, rule = RESNET_SPLIT_POINTS[i + 1], "privacy"
+                    resplit_checkpoint(checkpoint, nxt)
+                elif not a.no_fl:
+                    nxt_method, rule = "fl", "privacy"
+            msg = (f"mse={leak['attack_mse']:.4f} rho={leak['rho']:.3f} "
+                   f"dDcor={leak['delta_dcor']:.3f}")
+        else:
+            leak, msg = {}, "(no smashed data)"
+        nxt_stage = nxt if nxt_method == "sfl" else "fl"
+        rows.append({"name": a.name, "round": r, "method": method, "split": split, **m, **leak,
+                     "rho_min": "" if a.static else a.rho_min, "next": nxt_stage, "rule": rule})
         write_csv(run_dir / "rounds.csv", rows)
-        print(f"  r{r:02d} {split}: acc={m['acc']:.2f}% round={m['total']:.0f}s "
-              f"mse={leak['attack_mse']:.4f} rho={leak['rho']:.3f} dDcor={leak['delta_dcor']:.3f}"
-              + (f" -> {nxt} [privacy: rho < {a.rho_min}]" if rule else ""), flush=True)
-        split = nxt
+        print(f"  r{r:02d} {stage}: acc={m['acc']:.2f}% round={m['total']:.0f}s {msg}"
+              + (f" -> {nxt_stage} [privacy: rho < {a.rho_min}]" if rule else ""), flush=True)
+        method, split = nxt_method, nxt
     print(f"done -> {run_dir / 'rounds.csv'}")
 
 
