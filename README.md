@@ -157,33 +157,4 @@ You can also compare existing checkpoints directly:
 python .\measure_cutlayer_leakage.py --dataset cifar10 --num-clients 1 --noniid-alpha 0.1 --expected-split-after layer2 --checkpoint local=.\.checkpoints\local_cifar10_1clients_1cpu_5rounds_alpha0p1_resnet18_splitlayer2_checkpoint.pt --checkpoint fl=.\.checkpoints\fl_cifar10_1clients_1cpu_5rounds_alpha0p1_resnet18_splitlayer2_checkpoint.pt --checkpoint sl=.\.checkpoints\sl_cifar10_1clients_1cpu_5rounds_alpha0p1_resnet18_splitlayer2_checkpoint.pt --checkpoint sfl=.\.checkpoints\sfl_cifar10_1clients_1cpu_5rounds_alpha0p1_resnet18_splitlayer2_checkpoint.pt --csv-path .\.checkpoints\resnet18_leakage_compare.csv
 ```
 
-## Docker
 
-Build the image:
-
-```bash
-docker build -t minst-for-sfl .
-```
-
-Run a small smoke-test training job:
-
-```bash
-docker run --rm -v ${PWD}/data:/app/data -v ${PWD}/.checkpoints:/app/.checkpoints minst-for-sfl
-```
-
-Run with custom training arguments:
-
-```bash
-docker run --rm -v ${PWD}/data:/app/data -v ${PWD}/.checkpoints:/app/.checkpoints minst-for-sfl python main.py --method auto --num-clients 3 --client-cpus 1 --num-rounds 3 --max-batches 5
-```
-
-Or use Docker Compose:
-
-```bash
-docker compose up --build
-```
-
-Notes:
-- The image runs on CPU by default.
-- `./data` and `./.checkpoints` are mounted as volumes so downloaded datasets and checkpoints persist outside the container.
-- Set `SIMULATION_TOTAL_CPUS` and `--client-cpus` together when increasing the number of clients. For example, four clients with one CPU each usually need `-e SIMULATION_TOTAL_CPUS=4 --cpus 4`.
