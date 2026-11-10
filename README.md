@@ -1,129 +1,93 @@
-# Runtime Adaption switch Between FL,SL,SFL
+# Runtime Adaptation Across FL, SL and SFL
 
+Code for the thesis *Adaptative Runtime Switch of Distributed Learning Paradigms*.
+Federated Learning (FL), Split Learning (SL) and SplitFed Learning (SFL) are
+simulated with Flower and Ray, share one model definition and one checkpoint
+format, and can switch paradigm at the end of any round.
 
+## Files
 
-1. Core Module Description
-   - `main.py`: Unified scheduling entry point
-   - `fl_mnist_minimal.py`: Federated Learning
-   - `sl_mnist_minimal.py`: Split Learning
-   - `fsl_mnist_minimal.py`: Federated Split Learning
-   - `.\checkpoints`: Store the previous model parameters
-2. Automatic Method Selection Strategy
-   When `--method auto` is used, the program selects a training method based on
-   the number of clients and the CPU resources available on each client.
+**Training programs**
 
-   The current selection rules are:
-   - If the number of clients is fewer than 5, the system selects SL.
-   - If the number of clients is greater than 5 and every client has at least
-     2 CPUs, the system selects FL.
-   - In other middle cases, the system selects SFL.
+| File | Purpose |
+|---|---|
+| `fl_mnist_minimal.py` | FL training (FedAvg on the full model) |
+| `sl_mnist_minimal.py` | SL training (cut model, client-side models not aggregated) |
+| `fsl_mnist_minimal.py` | SFL training (cut model, client-side models aggregated with FedAvg) |
+| `flower_split_message.py` | Message-based training engine shared by SL and SFL |
+| `split_learning_utils.py` | Models (ResNet, CNN), cut layers, data loading, Dirichlet partition, seed, shared checkpoint |
+| `mnist_evaluation.py` | Test-set evaluation |
+| `noniid_jsd_switch.py` | Jensen–Shannon divergence of the client label distributions |
+| `main.py` | Single entry point: selects the initial paradigm and optionally switches on communication time |
+| `local_resnet_baseline.py` | Centralized reference (one client, whole training set) |
 
-   Users can also manually override the automatic selection by specifying:
+**Experiment scripts**
 
-   ```bash
-   python .\main.py --num-clients 5 --method fl
-   ```
+| File | Purpose |
+|---|---|
+| `run_baseline.py` | Static baseline grid (FL / SL / SFL × clients × data distribution), RQ1 |
+| `run_switch.py` | Runtime switching scenarios S1–S7, RQ2 |
+| `run_switch_seeds.sh` | Repeats the switching scenarios with seeds 1235–1238 |
+| `run_cutlayer.py` | SFL with the cut after each ResNet-18 stage and leakage of each cut, RQ3 |
+| `run_cutswitch.py` | Privacy-driven cut-layer switching, RQ3 |
+| `measure_all_leakage.py`, `measure_cutlayer_leakage.py` | Distance correlation and reconstruction attack on the smashed data |
+| `dcor_privacy.py` | Distance correlation and reconstruction-attack helpers |
+| `run_resnet18_paradigm_comparison.py` | Earlier comparison script for ResNet-18 runs and leakage |
 
-3. Communication Time Measurement and Simulation
+**Data and results**
 
-   We measure the communication-related runtime for each training
-   executionn by taking timestamp.
+| Path | Content |
+|---|---|
+| `switch_baselines/` | Baseline round times used to calibrate the switching thresholds |
+| `results/` | Archived results of the experiments |
+| `data/` | Datasets (downloaded on the first run) |
 
-   A simulated delay can be added with `--communication-delay`. This makes it
-   possible to test how different methods behave under bad network condition,
+## How to run
 
-   Example:
-   ```bash
-   python .\main.py --num-clients 5 --num-rounds 3 --communication-delay 0.1,0.3,0.6
-   ```
+Install the dependencies (Python 3.10+):
 
-4. Adaptive Communication-Based Switching Mechanism
-
-   In adaptive mode, the program runs one training round at a time. After each
-   round, it compares the current communication time with the previous round.
-   If the communication time increases beyond the configured threshold , the
-   method is switched for the next round.
-
-   The default switching threshold is 20 percent and can be changed with
-   `--switch-threshold`.
-
-   The switching order is:
-
-   ```text
-   SL -> SFL -> FL
-   ```
-
-5. Checkpoint Saving and Recovery
-
-   Checkpoints are used to save model parameters during adaptive training.
-   This allows the project to preserve the state of each method across rounds
-   instead of restarting from scratch every time.
-
-   The shared data partition configuration is stored in the checkpoint. If a
-   checkpoint was created with a different `--num-clients`, `--noniid-alpha`,
-   or seed, recovery stops with an error instead of silently mixing
-   incompatible client data splits.
-
-   By default, checkpoints are stored in:
-
-   ```text
-   .\checkpoints
-   ```
-
-6. Non-IID Data Splitting
-
-   Training data can be split by a shared Dirichlet distribution with
-   `--noniid-alpha` in the range `[0, 1]`. Smaller values create stronger
-   label skew across clients. The default value is `1.0`, which keeps the
-   original IID split.
-
-   Example:
-   ```bash
-   python .\main.py --method fl --num-clients 3 --num-rounds 3 --noniid-alpha 0.2
-   ```
-
-   MNIST is still the default dataset. CIFAR-10 can be selected with
-   `--dataset cifar10`; the first run downloads it under `.\data`.
-
-   Example:
-   ```bash
-   python .\main.py --method sfl --dataset cifar10 --num-clients 3 --num-rounds 3 --max-batches 5
-   ```
-
-7. Boundary-Scalar Non-IID Detection and Pattern Toggling
-
-   The training path does not send raw per-class counts or full label
-   distribution vectors to the server. Each Flower client computes one local
-   boundary scalar:
-
-   ```text
-   JSD(local_label_distribution || uniform_reference)
-   ```
-
-   The scalar uses log base 2, so the value is in `[0, 1]`. The server-side
-   Pattern Toggling Manager consumes only these scalar scores. If the mean score
-   is at or above `--strong-noniid-jsd-threshold`, SL toggles to the SFL pattern
-   by enabling client-side FedAvg.
-
-   Inspect the current split:
-
-   ```bash
-   python .\noniid_jsd_switch.py --num-clients 3 --noniid-alpha 0.2
-   ```
-
-   Enable method switching before training:
-
-   ```bash
-   python .\main.py --method auto --num-clients 3 --num-rounds 3 --noniid-alpha 0.2 --adaptive-noniid-switch
-   ```
-
-   The offline `noniid_jsd_switch.py` report still prints full counts and a JSD
-   matrix for debugging, but that path is not used by the privacy-preserving
-   Flower message switch.
-
-   
-
-
+```bash
+pip install -r requirements.txt
 ```
 
+The random seed is set with the environment variable `THESIS_SEED`
+(default `1234`).
 
+**Single run**
+
+```bash
+# FL, SL or SFL on MNIST with 3 clients
+python main.py --method fl  --num-clients 3 --num-rounds 3
+python main.py --method sfl --num-clients 3 --num-rounds 3 --dataset cifar10 --noniid-alpha 0.5
+
+# initial paradigm chosen automatically, switching on communication time
+python main.py --method auto --num-clients 3 --num-rounds 5 \
+    --adaptive-communication-switch --communication-delay 0,8,5
+```
+
+**Baseline grid (RQ1)**
+
+```bash
+python run_baseline.py plan                                   # show the grid
+python run_baseline.py --model resnet18 --dataset cifar10 run # run it (resumable)
+python run_baseline.py --repeats 1-4 run                      # repetitions, seeds 1235-1238
+python run_baseline.py summarize                              # build the CSV tables
+```
+
+**Runtime switching (RQ2)**
+
+```bash
+python run_switch.py run --setup resnet_cifar10 --baseline switch_baselines/resnet_cifar10_rounds.csv
+python run_switch.py run --setup cnn_mnist      --baseline switch_baselines/cnn_mnist_rounds.csv --only S1,S3
+python run_switch.py report --setup resnet_cifar10 --baseline switch_baselines/resnet_cifar10_rounds.csv
+bash run_switch_seeds.sh resnet_cifar10                       # seeds 1235-1238
+```
+
+**Cut layer and privacy (RQ3)**
+
+```bash
+python run_cutlayer.py --dataset cifar10 --rounds 20
+python run_cutswitch.py --name rho04 --rho-min 0.4
+python run_cutswitch.py --name rho07 --rho-min 0.7
+python run_cutswitch.py --name static --static
+```
